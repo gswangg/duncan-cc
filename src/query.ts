@@ -11,7 +11,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { processSessionFile, processSessionWindows, type PipelineResult, type WindowPipelineResult } from "./pipeline.js";
-import { resolveSessionFiles, type RoutingParams, type RoutingResult } from "./discovery.js";
+import { resolveSessionFilesExcludingSelf, type RoutingParams, type RoutingResult } from "./discovery.js";
 
 // ============================================================================
 // OAuth token resolution
@@ -237,7 +237,7 @@ export async function querySingleWindow(
  */
 export async function queryBatch(
   question: string,
-  routing: RoutingParams,
+  routing: RoutingParams & { toolUseId?: string },
   opts: {
     apiKey?: string;
     model?: string;
@@ -247,7 +247,7 @@ export async function queryBatch(
   } = {},
 ): Promise<DuncanBatchResult> {
   const queryId = randomUUID();
-  const resolved = resolveSessionFiles(routing);
+  const resolved = resolveSessionFilesExcludingSelf(routing);
 
   if (resolved.sessions.length === 0) {
     return {

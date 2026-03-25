@@ -14,7 +14,8 @@
     "test:replacements": "npx tsx tests/content-replacements.test.ts",
     "test:system": "npx tsx tests/system-prompt.test.ts",
     "test:pipeline": "npx tsx tests/pipeline.test.ts",
-    "test:discovery": "npx tsx tests/discovery.test.ts"
+    "test:discovery": "npx tsx tests/discovery.test.ts",
+    "test:self-exclusion": "npx tsx tests/self-exclusion.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",

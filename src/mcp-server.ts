@@ -19,7 +19,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { processSessionFile, processSessionWindows } from "./pipeline.js";
-import { resolveSessionFiles, getProjectsDir, listAllSessionFiles } from "./discovery.js";
+import { resolveSessionFiles, resolveSessionFilesExcludingSelf, getProjectsDir, listAllSessionFiles } from "./discovery.js";
 import { querySingleWindow, queryBatch } from "./query.js";
 
 // ============================================================================
@@ -121,11 +121,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 // ============================================================================
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+  const { name, arguments: args, _meta } = request.params;
+
+  // CC passes tool_use ID in _meta — used for self-exclusion
+  const toolUseId = (_meta as Record<string, unknown> | undefined)?.["claudecode/toolUseId"] as string | undefined;
 
   switch (name) {
     case "duncan_query":
-      return handleDuncanQuery(args as any);
+      return handleDuncanQuery(args as any, toolUseId);
     case "duncan_list_sessions":
       return handleListSessions(args as any);
     default:
@@ -145,7 +148,7 @@ async function handleDuncanQuery(args: {
   limit?: number;
   offset?: number;
   includeSubagents?: boolean;
-}) {
+}, toolUseId?: string) {
   try {
     const result = await queryBatch(
       args.question,
@@ -157,6 +160,7 @@ async function handleDuncanQuery(args: {
         limit: args.limit ?? 10,
         offset: args.offset ?? 0,
         includeSubagents: args.includeSubagents ?? false,
+        toolUseId, // for self-exclusion
       },
       {
         apiKey: undefined, // resolved automatically from CC/pi OAuth or ANTHROPIC_API_KEY
