@@ -35,7 +35,7 @@ const AGENT_NOTES = `Notes:
 // Environment info — CC's Sr9()
 // ============================================================================
 
-interface EnvironmentInfo {
+export interface EnvironmentInfo {
   cwd: string;
   isGitRepo?: boolean;
   additionalDirs?: string[];
@@ -223,6 +223,26 @@ export function injectUserContext(
       content: `<system-reminder>\nAs you answer the user's questions, you can use the following context:\n${contextText}\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>`,
     },
   };
+
+  const toContentArray = (c: string | any[]): any[] =>
+    typeof c === "string" ? [{ type: "text", text: c }] : c;
+
+  // If first message is user, merge context into it to maintain alternation
+  if (messages.length > 0 && messages[0].type === "user") {
+    const first = messages[0];
+    const contextContent = toContentArray(reminderMsg.message.content);
+    const firstContent = toContentArray(first.message.content);
+    return [
+      {
+        ...first,
+        message: {
+          ...first.message,
+          content: [...contextContent, ...firstContent],
+        },
+      },
+      ...messages.slice(1),
+    ];
+  }
 
   return [reminderMsg, ...messages];
 }

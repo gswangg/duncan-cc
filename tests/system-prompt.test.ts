@@ -84,21 +84,23 @@ console.log("\n--- userContext injection ---");
     const normalized = normalizeMessages(chain);
     const withContext = injectUserContext(normalized, "/workspace");
 
-    // Should have one more message (the system-reminder)
+    // If first message was user, context is merged in (same count)
+    // If first message was assistant, context is prepended (+1)
+    const firstWasUser = normalized.length > 0 && normalized[0].type === "user";
+    const expectedLen = firstWasUser ? normalized.length : normalized.length + 1;
     assert(
-      withContext.length === normalized.length + 1,
-      `${name}: +1 message after context injection`,
+      withContext.length === expectedLen,
+      `${name}: correct length after context injection (${withContext.length} vs ${expectedLen})`,
     );
 
-    // First message should be the system-reminder
+    // First message should contain the system-reminder
     const first = withContext[0];
-    assert(first.type === "user", "injected message is user");
-    assert(first.isMeta === true, "injected message is meta");
+    assert(first.type === "user", "first message is user");
 
     const content = typeof first.message.content === "string"
       ? first.message.content
       : JSON.stringify(first.message.content);
-    assert(content.includes("<system-reminder>"), "has system-reminder tag");
+    assert(content.includes("system-reminder"), "has system-reminder");
     assert(content.includes("currentDate"), "has currentDate");
 
     ok(`${name}: context injected, ${content.length} chars`);
