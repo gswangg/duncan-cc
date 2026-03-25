@@ -365,6 +365,7 @@ export function normalizeMessages(messages: CCMessage[]): CCMessage[] {
   normalized = removeTrailingThinking(normalized);    // QjY
   normalized = removeWhitespaceAssistant(normalized); // gn6
   normalized = fixEmptyAssistantContent(normalized);  // cjY
+  normalized = fixOrphanedToolUse(normalized);        // ensure every tool_use has a tool_result
 
   return normalized;
 }
@@ -487,4 +488,63 @@ function fixEmptyAssistantContent(messages: CCMessage[]): CCMessage[] {
     }
     return msg;
   });
+}
+
+// ============================================================================
+// Post-transform 5: Fix orphaned tool_use blocks
+// Ensure every tool_use in an assistant message has a corresponding tool_result
+// in the following user message. Insert synthetic results for missing ones.
+// ============================================================================
+
+function fixOrphanedToolUse(messages: CCMessage[]): CCMessage[] {
+  const result: CCMessage[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    result.push(messages[i]);
+
+    const msg = messages[i];
+    if (msg.type !== "assistant" || !Array.isArray(msg.message.content)) continue;
+
+    const toolUses = msg.message.content.filter((c: any) => c.type === "tool_use");
+    if (toolUses.length === 0) continue;
+
+    // Check next message for matching tool_results
+    const next = messages[i + 1];
+    const nextContent = (next?.type === "user" && Array.isArray(next?.message?.content))
+      ? next.message.content
+      : [];
+    const existingResultIds = new Set(
+      nextContent.filter((c: any) => c.type === "tool_result").map((c: any) => c.tool_use_id)
+    );
+
+    const orphaned = toolUses.filter((tu: any) => !existingResultIds.has(tu.id));
+    if (orphaned.length === 0) continue;
+
+    // Build synthetic tool_result blocks
+    const syntheticResults = orphaned.map((tu: any) => ({
+      type: "tool_result",
+      tool_use_id: tu.id,
+      content: "[Tool execution interrupted]",
+      is_error: true,
+    }));
+
+    if (next?.type === "user" && Array.isArray(next?.message?.content)) {
+      // Inject into the existing user message
+      messages[i + 1] = {
+        ...next,
+        message: {
+          ...next.message,
+          content: [...syntheticResults, ...nextContent],
+        },
+      };
+    } else {
+      // Insert a new user message with the synthetic results
+      result.push(makeUserMessage(syntheticResults, {
+        timestamp: msg.timestamp,
+        isMeta: true,
+      }));
+    }
+  }
+
+  return result;
 }

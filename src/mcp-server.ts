@@ -159,7 +159,7 @@ async function handleDuncanQuery(args: {
         includeSubagents: args.includeSubagents ?? false,
       },
       {
-        apiKey: process.env.ANTHROPIC_API_KEY,
+        apiKey: undefined, // resolved automatically from CC/pi OAuth or ANTHROPIC_API_KEY
       },
     );
 

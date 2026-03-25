@@ -7,8 +7,80 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "node:crypto";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { processSessionFile, processSessionWindows, type PipelineResult, type WindowPipelineResult } from "./pipeline.js";
 import { resolveSessionFiles, type RoutingParams, type RoutingResult } from "./discovery.js";
+
+// ============================================================================
+// OAuth token resolution
+// ============================================================================
+
+/**
+ * Resolve Anthropic API key from:
+ * 1. Explicit apiKey parameter
+ * 2. ANTHROPIC_API_KEY env var
+ * 3. CC's OAuth credentials (~/.claude/.credentials.json) → exchange for API key
+ * 4. Pi's OAuth credentials (~/.pi/agent/auth.json) → exchange for API key
+ */
+
+
+
+interface ResolvedAuth {
+  apiKey?: string | null;
+  authToken?: string;
+  defaultHeaders?: Record<string, string>;
+}
+
+function resolveAuth(explicit?: string): ResolvedAuth {
+  if (explicit) {
+    // If explicit key looks like OAuth token, use authToken
+    if (explicit.includes("sk-ant-oat")) {
+      return oauthClientConfig(explicit);
+    }
+    return { apiKey: explicit };
+  }
+  if (process.env.ANTHROPIC_API_KEY) return { apiKey: process.env.ANTHROPIC_API_KEY };
+
+  // CC's OAuth
+  const ccCredsPath = join(homedir(), ".claude", ".credentials.json");
+  if (existsSync(ccCredsPath)) {
+    try {
+      const creds = JSON.parse(readFileSync(ccCredsPath, "utf-8"));
+      if (creds.claudeAiOauth?.accessToken) {
+        return oauthClientConfig(creds.claudeAiOauth.accessToken);
+      }
+    } catch {}
+  }
+
+  // Pi's OAuth
+  const piAuthPath = join(homedir(), ".pi", "agent", "auth.json");
+  if (existsSync(piAuthPath)) {
+    try {
+      const auth = JSON.parse(readFileSync(piAuthPath, "utf-8"));
+      if (auth.anthropic?.access) {
+        return oauthClientConfig(auth.anthropic.access);
+      }
+    } catch {}
+  }
+
+  throw new Error("No Anthropic auth found. Set ANTHROPIC_API_KEY or authenticate via Claude Code or pi.");
+}
+
+function oauthClientConfig(token: string): ResolvedAuth {
+  return {
+    apiKey: null,
+    authToken: token,
+    defaultHeaders: {
+      "accept": "application/json",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
+      "user-agent": "duncan-cc/0.1.0",
+      "x-app": "cli",
+    },
+  };
+}
 
 // ============================================================================
 // Duncan Response Tool
@@ -82,7 +154,12 @@ export async function querySingleWindow(
     signal?: AbortSignal;
   } = {},
 ): Promise<DuncanResult> {
-  const client = new Anthropic({ apiKey: opts.apiKey });
+  const auth = resolveAuth(opts.apiKey);
+  const isOAuth = !!auth.authToken;
+  const client = new Anthropic({
+    ...auth,
+    dangerouslyAllowBrowser: true,
+  } as any);
   const model = opts.model ?? pipeline.modelInfo?.modelId ?? "claude-sonnet-4-20250514";
 
   // Build messages: session context + question
@@ -100,10 +177,25 @@ export async function querySingleWindow(
   // Ensure messages alternate correctly (the question might create user→user)
   const fixedMessages = ensureAlternation(messages);
 
+  // Build system prompt — OAuth requires Claude Code identity prefix
+  const systemBlocks: Anthropic.TextBlockParam[] = [];
+  if (isOAuth) {
+    systemBlocks.push({
+      type: "text",
+      text: "You are Claude Code, Anthropic's official CLI for Claude.",
+    });
+  }
+  if (pipeline.systemPrompt) {
+    systemBlocks.push({
+      type: "text",
+      text: pipeline.systemPrompt,
+    });
+  }
+
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const response = await client.messages.create({
       model,
-      system: pipeline.systemPrompt,
+      system: systemBlocks.length > 0 ? systemBlocks : undefined,
       messages: fixedMessages,
       tools: [DUNCAN_RESPONSE_TOOL],
       max_tokens: 16384,
