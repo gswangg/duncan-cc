@@ -4,5 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "npx tsx tests/parser-tree.test.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0"
   }
 }
