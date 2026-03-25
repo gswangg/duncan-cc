@@ -492,3 +492,73 @@ Completely independent JSONL files in subdirectories. Not reachable via `parentU
 
 ### A7. Compact boundary filtering in `HX()`
 **Critical finding**: compact boundary messages (`subtype: "compact_boundary"`) are filtered OUT by `HX()` because they are `type: "system"` but not `subtype: "local_command"`. Only `local_command` system messages pass through. The boundary itself never reaches the API. `vk()` already sliced from the boundary, so the boundary's role is purely structural (tree surgery anchor point).
+
+---
+
+## 16. Full Replication Requirements
+
+Everything that affects what the model sees must be replicated. Only mechanical/caching concerns can be skipped.
+
+### MUST replicate:
+1. **Session parsing** — `mu()`, `mi()`, `Ns6()` filter
+2. **Preserved segment relinking** — `wHY()` 
+3. **Tree walk** — `Vs6()` + `OHY()`
+4. **Field stripping** — `Yt1()`
+5. **Boundary slicing** — `vk()`
+6. **Content replacements** — `L34()` / `pI9()` — apply persisted output replacements from `type: "content-replacement"` entries
+7. **Microcompact** — `Kp()` / `Oe9()` — truncate old tool results for sessions with time gaps
+8. **Message normalization** — `HX()` — filter, type conversion, merging, attachment conversion, post-transforms (pn6, QjY, gn6, cjY)
+9. **userContext injection** — `aR8()` — prepend CLAUDE.md content + currentDate as `<system-reminder>`
+10. **System prompt reconstruction** — full chain:
+    - Base: `sH8()` → `"You are Claude Code, Anthropic's official CLI for Claude."`
+    - Agent notes: `dQ6()` → agent thread notes, emoji prohibition, path conventions
+    - Environment: `Sr9()` → working directory, platform, OS, model name, knowledge cutoff
+    - CLAUDE.md: `bO()` → loads from multiple sources:
+      - Managed CLAUDE.md (from settings)
+      - Managed rules directory
+      - User CLAUDE.md + rules directory (if userSettings allowed)
+      - Project CLAUDE.md: walks from cwd up to root, loading `CLAUDE.md`, `.claude/CLAUDE.md`, `.claude/rules/` at each level
+      - Local CLAUDE.md: `CLAUDE.local.md` at each level
+      - Additional directories CLAUDE.md
+      - AutoMem (MEMORY.md) if enabled
+      - TeamMem if enabled
+    - Format: `FE1()` wraps each source with type label (project instructions, user instructions, etc.)
+    - Header: `"Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written."`
+11. **systemContext injection** — `cYq()` appends git status to system prompt array
+12. **API format conversion** — `ejY()`/`AJY()` — extract `{role, content}` only
+
+### CAN skip:
+1. **Cache breakpoints** — `wJY()` — `cache_control` markers, no semantic effect
+2. **Tool schema building** — duncan uses its own `duncan_response` tool
+3. **Feature flag checks** — use sensible defaults
+4. **Telemetry** — `Q()` calls throughout
+5. **Attribution header** — `tH8()` — billing metadata
+
+### System prompt reconstruction strategy
+
+For duncan queries against CC sessions:
+1. Read CLAUDE.md files from disk using the same path resolution CC uses (cwd walk, user dir, managed dir)
+2. If files have changed since the session, we get the current version — acceptable tradeoff since we can't reconstruct the historical version without snapshots
+3. Assemble using the same template structure (`dQ6` + `Sr9` + `FE1`)
+4. Include environment info (cwd, platform, OS)
+5. Model name comes from the session's assistant messages
+
+### Content replacement strategy
+
+Content replacements are stored in the session JSONL as `type: "content-replacement"` entries. Each has:
+- `sessionId` or `agentId` — scope
+- `replacements[]` — array of `{ kind: "tool-result", toolUseId, replacement }` 
+
+The replacement function `pI9()` also reads persisted outputs from disk (`gI9()`). For duncan:
+1. Apply replacements from the session's `content-replacement` entries
+2. If persisted output files exist on disk, apply those too
+3. If files are missing, use the original content — it's more info, not less
+
+### Microcompact strategy
+
+`Kp()` truncates old tool results when resuming after a time gap (> threshold minutes). For duncan:
+1. Check the time gap between the last assistant message and the current time
+2. If gap exceeds threshold, apply microcompact (replace old tool_result content with placeholder)
+3. Keep recent tool results intact
+
+This is important because without it, a session with many large tool results could exceed the context window.
