@@ -1,12 +1,34 @@
 {
   "name": "duncan-cc",
   "version": "0.1.0",
+  "description": "Query dormant Claude Code sessions — the Duncan Idaho approach to agent memory, for CC.",
   "type": "module",
+  "bin": {
+    "duncan-cc": "./src/mcp-server.ts"
+  },
   "scripts": {
-    "test": "npx tsx tests/parser-tree.test.ts"
+    "start": "npx tsx src/mcp-server.ts",
+    "test": "for t in tests/*.test.ts; do npx tsx \"$t\" || exit 1; done",
+    "test:parser": "npx tsx tests/parser-tree.test.ts",
+    "test:normalize": "npx tsx tests/normalize.test.ts",
+    "test:replacements": "npx tsx tests/content-replacements.test.ts",
+    "test:system": "npx tsx tests/system-prompt.test.ts",
+    "test:pipeline": "npx tsx tests/pipeline.test.ts",
+    "test:discovery": "npx tsx tests/discovery.test.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.80.0",
-    "@modelcontextprotocol/sdk": "^1.27.1"
-  }
+    "@anthropic-ai/sdk": "^0.52.0",
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gswangg/duncan-cc.git"
+  },
+  "license": "MIT"
 }
