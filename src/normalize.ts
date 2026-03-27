@@ -1,11 +1,11 @@
 /**
- * CC Message Normalization — HX() equivalent
+ * CC Message Normalization — HX()/p2() equivalent
  * 
  * Converts internal CC message format to API-compatible format.
  * Handles: filtering, type conversion, merging, attachment conversion,
- * and 4 post-normalization transforms.
+ * and 8 post-normalization transforms matching CC 2.1.85's chain:
  * 
- * Pipeline: fjY → filter → type switch → post-transforms (pn6, QjY, gn6, cjY)
+ * Pipeline: $w3 → filter → type switch → Jw3 → Me8 → Cw3 → Pe8(+fw3) → Iw3 → LV4 → ww3
  */
 
 import type { CCMessage } from "./parser.js";
@@ -359,13 +359,17 @@ export function normalizeMessages(messages: CCMessage[]): CCMessage[] {
     }
   }
 
-  // Post-transforms
+  // Post-transforms — matches CC's chain: Jw3 → Me8 → Cw3 → Pe8 → Iw3 → LV4 → fw3 → ww3
   let normalized = result;
-  normalized = filterOrphanedThinking(normalized);    // pn6
-  normalized = removeTrailingThinking(normalized);    // QjY
-  normalized = removeWhitespaceAssistant(normalized); // gn6
-  normalized = fixEmptyAssistantContent(normalized);  // cjY
-  normalized = fixOrphanedToolUse(normalized);        // ensure every tool_use has a tool_result
+  normalized = relocateDeferredToolRefText(normalized); // Jw3
+  normalized = filterOrphanedThinking(normalized);     // Me8/pn6
+  normalized = removeTrailingThinking(normalized);     // Cw3/QjY
+  normalized = removeWhitespaceAssistant(normalized);  // Pe8/gn6 (includes fw3 re-merge)
+  normalized = fixEmptyAssistantContent(normalized);   // Iw3/cjY
+  normalized = reorderSystemReminders(normalized);     // LV4
+  // fw3 (re-merge consecutive users) is inlined in removeWhitespaceAssistant
+  normalized = flattenErrorToolResults(normalized);    // ww3
+  normalized = fixOrphanedToolUse(normalized);         // ensure every tool_use has a tool_result
 
   return normalized;
 }
@@ -491,7 +495,155 @@ function fixEmptyAssistantContent(messages: CCMessage[]): CCMessage[] {
 }
 
 // ============================================================================
-// Post-transform 5: Fix orphaned tool_use blocks
+// Post-transform 5: Relocate deferred tool_reference text — Jw3()
+// Moves text blocks from user messages that contain tool_references into the
+// next user message that has tool_results (but no tool_references itself).
+// This keeps reference context adjacent to the tool output it describes.
+// ============================================================================
+
+function hasToolReferences(content: any[]): boolean {
+  return content.some((c: any) => c.type === "tool_reference");
+}
+
+function relocateDeferredToolRefText(messages: CCMessage[]): CCMessage[] {
+  const result = [...messages];
+
+  for (let i = 0; i < result.length; i++) {
+    const msg = result[i];
+    if (msg.type !== "user") continue;
+    const content = msg.message.content;
+    if (!Array.isArray(content)) continue;
+    if (!hasToolReferences(content)) continue;
+
+    const textBlocks = content.filter((c: any) => c.type === "text");
+    if (textBlocks.length === 0) continue;
+
+    // Find the next user message with tool_results but without tool_references
+    let targetIdx = -1;
+    for (let j = i + 1; j < result.length; j++) {
+      const candidate = result[j];
+      if (candidate.type !== "user") continue;
+      const cc = candidate.message.content;
+      if (!Array.isArray(cc)) continue;
+      if (!cc.some((c: any) => c.type === "tool_result")) continue;
+      if (hasToolReferences(cc)) continue;
+      targetIdx = j;
+      break;
+    }
+
+    if (targetIdx === -1) continue;
+
+    // Move text blocks from source to target
+    result[i] = {
+      ...msg,
+      message: {
+        ...msg.message,
+        content: content.filter((c: any) => c.type !== "text"),
+      },
+    };
+
+    const target = result[targetIdx];
+    result[targetIdx] = {
+      ...target,
+      message: {
+        ...target.message,
+        content: [...target.message.content, ...textBlocks],
+      },
+    };
+  }
+
+  return result;
+}
+
+// ============================================================================
+// Post-transform 6: Reorder system-reminder blocks in tool_results — LV4()
+// Moves <system-reminder> text blocks from user messages into the last
+// tool_result in that same message, keeping them adjacent to tool output.
+// ============================================================================
+
+function reorderSystemReminders(messages: CCMessage[]): CCMessage[] {
+  return messages.map((msg) => {
+    if (msg.type !== "user") return msg;
+    const content = msg.message.content;
+    if (!Array.isArray(content)) return msg;
+    if (!content.some((c: any) => c.type === "tool_result")) return msg;
+
+    // Separate system-reminder text blocks from everything else
+    const reminders: any[] = [];
+    const rest: any[] = [];
+    for (const block of content) {
+      if (
+        block.type === "text" &&
+        typeof block.text === "string" &&
+        block.text.startsWith("<system-reminder>")
+      ) {
+        reminders.push(block);
+      } else {
+        rest.push(block);
+      }
+    }
+
+    if (reminders.length === 0) return msg;
+
+    // Find the last tool_result and inject reminders into its content
+    const lastToolResultIdx = rest.map((c: any) => c.type).lastIndexOf("tool_result");
+    if (lastToolResultIdx === -1) return msg;
+
+    const lastToolResult = rest[lastToolResultIdx];
+    const existingContent = Array.isArray(lastToolResult.content)
+      ? lastToolResult.content
+      : typeof lastToolResult.content === "string"
+        ? [{ type: "text", text: lastToolResult.content }]
+        : [];
+
+    const updated = {
+      ...lastToolResult,
+      content: [...existingContent, ...reminders],
+    };
+
+    const newContent = [...rest.slice(0, lastToolResultIdx), updated, ...rest.slice(lastToolResultIdx + 1)];
+    return {
+      ...msg,
+      message: { ...msg.message, content: newContent },
+    };
+  });
+}
+
+// ============================================================================
+// Post-transform 7: Flatten error tool_results — ww3()
+// Error tool_results that contain non-text blocks (images, etc.) get stripped
+// to text-only content. Prevents sending binary content in error responses.
+// ============================================================================
+
+function flattenErrorToolResults(messages: CCMessage[]): CCMessage[] {
+  return messages.map((msg) => {
+    if (msg.type !== "user") return msg;
+    const content = msg.message.content;
+    if (!Array.isArray(content)) return msg;
+
+    let changed = false;
+    const newContent = content.map((block: any) => {
+      if (block.type !== "tool_result" || !block.is_error) return block;
+      const inner = block.content;
+      if (!Array.isArray(inner)) return block;
+      // If all content is text, leave it alone
+      if (inner.every((c: any) => c.type === "text")) return block;
+
+      changed = true;
+      const textParts = inner.filter((c: any) => c.type === "text").map((c: any) => c.text);
+      return {
+        ...block,
+        content: textParts.length > 0 ? [{ type: "text", text: textParts.join("\n\n") }] : [],
+      };
+    });
+
+    if (!changed) return msg;
+    return { ...msg, message: { ...msg.message, content: newContent } };
+  });
+}
+
+// ============================================================================
+// Post-transform 8: Fix orphaned tool_use blocks
 // Ensure every tool_use in an assistant message has a corresponding tool_result
 // in the following user message. Insert synthetic results for missing ones.
 // ============================================================================
