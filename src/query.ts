@@ -453,6 +453,110 @@ export async function querySelf(
 }
 
 // ============================================================================
+// Ancestors Query — prior compaction windows of the active session
+// ============================================================================
+
+/**
+ * Query the calling session's prior compaction windows (excluding active).
+ *
+ * In CC (no dfork), "ancestors" means the compacted windows of the current
+ * session — the context that was summarized away. Returns nothing if the
+ * session has no compaction boundaries.
+ */
+export async function queryAncestors(
+  question: string,
+  opts: {
+    toolUseId: string;
+    limit?: number;
+    offset?: number;
+    batchSize?: number;
+    apiKey?: string;
+    model?: string;
+    signal?: AbortSignal;
+    onProgress?: (completed: number, total: number) => void;
+  },
+): Promise<DuncanBatchResult> {
+  const queryId = randomUUID();
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+
+  // Find the calling session
+  const allSessions = listAllSessionFiles();
+  const callingSessionId = findCallingSession(opts.toolUseId, allSessions);
+  if (!callingSessionId) {
+    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset };
+  }
+
+  const session = allSessions.find(s => s.sessionId === callingSessionId);
+  if (!session) {
+    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset };
+  }
+
+  // Get all windows, drop the last (active) one
+  const allWindows = processSessionWindows(session.path);
+  const ancestorWindows = allWindows.slice(0, -1).filter(w => w.messages.length > 0);
+
+  if (ancestorWindows.length === 0) {
+    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset };
+  }
+
+  const totalWindows = ancestorWindows.length;
+  const page = ancestorWindows.slice(offset, offset + limit);
+
+  const batchSize = opts.batchSize ?? 5;
+  const results: DuncanQueryResult[] = [];
+  let completed = 0;
+
+  for (let i = 0; i < page.length; i += batchSize) {
+    if (opts.signal?.aborted) break;
+
+    const batch = page.slice(i, i + batchSize);
+    const batchResults = await Promise.all(
+      batch.map(async (window) => {
+        try {
+          const result = await querySingleWindow(window, question, {
+            apiKey: opts.apiKey,
+            model: opts.model ?? window.modelInfo?.modelId,
+            signal: opts.signal,
+          });
+          completed++;
+          opts.onProgress?.(completed, page.length);
+          return {
+            queryId,
+            sessionFile: session.path,
+            sessionId: session.sessionId,
+            windowIndex: window.windowIndex,
+            model: window.modelInfo?.modelId ?? "unknown",
+            result,
+          };
+        } catch (err: any) {
+          completed++;
+          opts.onProgress?.(completed, page.length);
+          return {
+            queryId,
+            sessionFile: session.path,
+            sessionId: session.sessionId,
+            windowIndex: window.windowIndex,
+            model: window.modelInfo?.modelId ?? "unknown",
+            result: { hasContext: false, answer: `Error: ${err.message}` },
+          };
+        }
+      }),
+    );
+    results.push(...batchResults);
+  }
+
+  return {
+    queryId,
+    question,
+    results,
+    totalWindows,
+    hasMore: offset + limit < totalWindows,
+    offset,
+  };
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 

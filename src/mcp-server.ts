@@ -20,7 +20,7 @@ import {
 
 import { processSessionFile, processSessionWindows } from "./pipeline.js";
 import { resolveSessionFiles, resolveSessionFilesExcludingSelf, getProjectsDir, listAllSessionFiles } from "./discovery.js";
-import { querySingleWindow, queryBatch, querySelf } from "./query.js";
+import { querySingleWindow, queryBatch, querySelf, queryAncestors } from "./query.js";
 
 // ============================================================================
 // Server setup
@@ -52,12 +52,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           mode: {
             type: "string",
-            enum: ["project", "global", "session", "self"],
+            enum: ["project", "global", "session", "self", "ancestors"],
             description:
               "Routing mode. 'project': sessions from a specific project dir. " +
               "'global': all sessions across all projects (newest first). " +
               "'session': a specific session file. " +
-              "'self': query own active window N times for sampling diversity.",
+              "'self': query own active window N times for sampling diversity. " +
+              "'ancestors': query own prior compaction windows (excluding active).",
           },
           projectDir: {
             type: "string",
@@ -186,6 +187,49 @@ async function handleDuncanQuery(args: {
       return {
         content: [{ type: "text", text: `**${args.question}** (${result.results.length} samples)\n\n${answers}\n\n*${contextCount}/${result.results.length} had relevant context. queryId: ${result.queryId}*` }],
       };
+    }
+
+    // Ancestors mode: query prior compaction windows of the calling session
+    if (args.mode === "ancestors") {
+      if (!toolUseId) {
+        return {
+          content: [{ type: "text", text: "Ancestors mode requires toolUseId from _meta (only available when called from CC)." }],
+          isError: true,
+        };
+      }
+      const result = await queryAncestors(args.question, {
+        toolUseId,
+        limit: args.limit ?? 50,
+        offset: args.offset ?? 0,
+        apiKey: undefined,
+      });
+
+      if (result.results.length === 0) {
+        return {
+          content: [{ type: "text", text: "No ancestor windows found. This session has no compaction boundaries." }],
+        };
+      }
+
+      const withContext = result.results.filter(r => r.result.hasContext);
+      const relevant = withContext.length > 0 ? withContext : result.results;
+
+      const answers = relevant.map((r) => {
+        const label = relevant.length === 1 ? "" : `### Window ${r.windowIndex}\n`;
+        return `${label}${r.result.answer}\n*— ${r.model}*`;
+      }).join("\n\n---\n\n");
+
+      const parts = [`**${args.question}**\n\n${answers}`];
+
+      if (result.hasMore) {
+        const nextOffset = (args.offset ?? 0) + (args.limit ?? 50);
+        const remaining = result.totalWindows - nextOffset;
+        parts.push(`\n\n---\n*Queried ${result.results.length} of ${result.totalWindows} windows. ${remaining} more available — call again with offset: ${nextOffset}.*`);
+      }
+
+      const contextCount = withContext.length;
+      parts.push(`\n\n*${contextCount}/${result.results.length} windows had relevant context. queryId: ${result.queryId}*`);
+
+      return { content: [{ type: "text", text: parts.join("") }] };
     }
 
     const result = await queryBatch(
