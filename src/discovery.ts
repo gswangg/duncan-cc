@@ -9,7 +9,7 @@
  * Also discovers subagent transcripts.
  */
 
-import { readdirSync, statSync, existsSync, openSync, readSync, closeSync } from "node:fs";
+import { readdirSync, statSync, existsSync, openSync, readSync, closeSync, readFileSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { homedir } from "node:os";
 
@@ -154,10 +154,138 @@ export function listSubagentFiles(sessionFile: string): SessionFileInfo[] {
 }
 
 // ============================================================================
+// Git branch extraction
+// ============================================================================
+
+/** Size of head chunk to scan for gitBranch (bytes). */
+const HEAD_SCAN_BYTES = 8_192;
+
+/**
+ * Extract git branch(es) from a session file by scanning the head.
+ * Returns unique branches found. Scans only the first HEAD_SCAN_BYTES
+ * since gitBranch appears in the earliest entries.
+ */
+export function extractGitBranches(filePath: string): string[] {
+  try {
+    const stat = statSync(filePath);
+    const readSize = Math.min(stat.size, HEAD_SCAN_BYTES);
+    const buf = Buffer.alloc(readSize);
+    const fd = openSync(filePath, "r");
+    readSync(fd, buf, 0, readSize, 0);
+    closeSync(fd);
+
+    const text = buf.toString("utf-8");
+    const branches = new Set<string>();
+    const re = /"gitBranch":"([^"]+)"/g;
+    let match;
+    while ((match = re.exec(text)) !== null) {
+      branches.add(match[1]);
+    }
+    return [...branches];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Extract the primary git branch for a session (first found).
+ */
+export function extractGitBranch(filePath: string): string | null {
+  const branches = extractGitBranches(filePath);
+  return branches.length > 0 ? branches[0] : null;
+}
+
+// ============================================================================
+// Project listing
+// ============================================================================
+
+export interface ProjectInfo {
+  /** The hashed project directory name (e.g., "-Users-foo-bar") */
+  dirName: string;
+  /** Full path to the project directory under ~/.claude/projects/ */
+  projectDir: string;
+  /** Reconstructed original working directory path */
+  cwd: string;
+  /** Number of sessions in this project */
+  sessionCount: number;
+  /** Most recent session activity */
+  lastActivity: Date;
+  /** Git branches seen across sessions */
+  branches: string[];
+}
+
+/**
+ * Reconstruct the original cwd from a CC project directory name.
+ * CC hashes cwd by replacing `/` with `-`, so `/Users/foo/bar` → `-Users-foo-bar`.
+ */
+function cwdFromDirName(dirName: string): string {
+  // Replace leading - and all subsequent - with /
+  // This is lossy if the original path contained hyphens, but it's the best we can do
+  return dirName.replace(/-/g, "/");
+}
+
+/**
+ * List all CC projects with metadata.
+ */
+export function listProjects(opts?: { limit?: number; offset?: number }): {
+  projects: ProjectInfo[];
+  totalCount: number;
+  hasMore: boolean;
+} {
+  const projectsDir = getProjectsDir();
+  if (!existsSync(projectsDir)) {
+    return { projects: [], totalCount: 0, hasMore: false };
+  }
+
+  const allProjects: ProjectInfo[] = [];
+
+  try {
+    const dirs = readdirSync(projectsDir, { withFileTypes: true });
+    for (const d of dirs) {
+      if (!d.isDirectory()) continue;
+      const fullPath = join(projectsDir, d.name);
+      const sessions = listSessionFiles(fullPath);
+      if (sessions.length === 0) continue;
+
+      // Collect branches from recent sessions (scan up to 5 for efficiency)
+      const branchSet = new Set<string>();
+      for (const s of sessions.slice(0, 5)) {
+        for (const b of extractGitBranches(s.path)) {
+          branchSet.add(b);
+        }
+      }
+
+      allProjects.push({
+        dirName: d.name,
+        projectDir: fullPath,
+        cwd: cwdFromDirName(d.name),
+        sessionCount: sessions.length,
+        lastActivity: sessions[0].mtime, // sessions already sorted newest-first
+        branches: [...branchSet],
+      });
+    }
+  } catch {
+    return { projects: [], totalCount: 0, hasMore: false };
+  }
+
+  // Sort by last activity, newest first
+  allProjects.sort((a, b) => b.lastActivity.getTime() - a.lastActivity.getTime());
+
+  const limit = opts?.limit ?? 50;
+  const offset = opts?.offset ?? 0;
+  const page = allProjects.slice(offset, offset + limit);
+  return {
+    projects: page,
+    totalCount: allProjects.length,
+    hasMore: offset + limit < allProjects.length,
+  };
+}
+
+// ============================================================================
 // Routing
 // ============================================================================
 
-export type RoutingMode = "project" | "global" | "session" | "self" | "ancestors" | "subagents";
+export type RoutingMode = "project" | "global" | "session" | "self" | "ancestors" | "subagents" | "branch";
 
 export interface RoutingParams {
   mode: RoutingMode;
@@ -173,6 +301,10 @@ export interface RoutingParams {
   limit?: number;
   /** Offset for pagination */
   offset?: number;
+  /** For "branch" mode: explicit git branch (auto-detected from calling session if omitted) */
+  gitBranch?: string;
+  /** Tool use ID from MCP _meta (used for self-exclusion and branch detection) */
+  toolUseId?: string;
 }
 
 export interface RoutingResult {
@@ -231,6 +363,45 @@ export function resolveSessionFiles(params: RoutingParams): RoutingResult {
         const all = listAllSessionFiles();
         allSessions = all.filter((s) => s.sessionId === params.sessionId);
       }
+      break;
+    }
+
+    case "branch": {
+      // Find all sessions in the same project that share a git branch with the current session.
+      // Requires toolUseId to identify the calling session, or an explicit gitBranch param.
+      const projectDir = params.projectDir ?? (params.cwd ? getProjectDir(params.cwd) : null);
+      if (!projectDir) {
+        return { sessions: [], totalCount: 0, hasMore: false };
+      }
+
+      const projectSessions = listSessionFiles(projectDir);
+      let targetBranch: string | null = null;
+
+      // If we have a toolUseId, find the calling session's branch
+      if (params.toolUseId) {
+        const callingId = findCallingSession(params.toolUseId, projectSessions);
+        if (callingId) {
+          const callingSession = projectSessions.find(s => s.sessionId === callingId);
+          if (callingSession) {
+            targetBranch = extractGitBranch(callingSession.path);
+          }
+        }
+      }
+
+      // Fallback: use the explicit gitBranch param
+      if (!targetBranch && params.gitBranch) {
+        targetBranch = params.gitBranch;
+      }
+
+      if (!targetBranch) {
+        return { sessions: [], totalCount: 0, hasMore: false };
+      }
+
+      // Filter to sessions that share the same branch
+      allSessions = projectSessions.filter(s => {
+        const branches = extractGitBranches(s.path);
+        return branches.includes(targetBranch!);
+      });
       break;
     }
 
@@ -319,7 +490,7 @@ export function findCallingSession(
  * and exclude the calling session from results.
  */
 export function resolveSessionFilesExcludingSelf(
-  params: RoutingParams & { toolUseId?: string },
+  params: RoutingParams,
 ): RoutingResult & { excludedSessionId: string | null } {
   const result = resolveSessionFiles(params);
 

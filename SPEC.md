@@ -4,7 +4,8 @@
 
 Duncan-cc replicates CC's full message pipeline to hydrate dormant CC sessions,
 then queries them with questions via the Anthropic API. Exposed as an MCP server
-(stdio transport) with two tools: `duncan_query` and `duncan_list_sessions`.
+(stdio transport) with three tools: `duncan_query`, `duncan_projects`, and
+`duncan_list_sessions`.
 
 ## Pipeline: Disk → API
 
@@ -63,7 +64,7 @@ Build system prompt (full parity with CC):
   ├── System rules
   ├── Coding instructions
   ├── Careful actions guidelines
-  ├── Tool usage
+  ├── Tool usage (+ per-tool instructions based on session's tools)
   ├── Tone and style
   ├── Output efficiency
   ├── Environment info (cwd, platform, model)
@@ -95,6 +96,8 @@ messages.create() with duncan_response tool
 | `session` | Specific session by ID/path | — |
 | `self` | Own active window, N copies (sampling diversity) | — (queries self intentionally) |
 | `ancestors` | Own prior compaction windows (excluding active) | Active window excluded |
+| `subagents` | Subagent transcripts of the active session | — |
+| `branch` | Sessions sharing the same git branch in the project | ✅ via toolUseId |
 
 ### Self-exclusion
 
@@ -115,6 +118,13 @@ Two-wave cache strategy:
 Queries compaction windows of the calling session excluding the active window.
 Returns nothing if the session has no compaction boundaries. In CC (no dfork
 lineage), "ancestors" = the compacted-away context from the current session.
+
+### Branch mode
+
+Collects all sessions from the same project directory that share a git branch
+with the calling session, ordered by mtime. CC sessions store `gitBranch` in
+their JSONL entries. If the calling session's branch can't be auto-detected,
+it can be passed explicitly via the `gitBranch` parameter.
 
 ## Authentication
 
@@ -151,6 +161,24 @@ This matches CC's own resume behavior: rebuild system prompt from current state.
 Note: tool schemas are NOT included — duncan sends only its own `duncan_response`
 tool. The session's original tools are not callable during a duncan query.
 
+## Query Logging
+
+Every query is logged to `~/.claude/duncan.jsonl` as append-only JSONL. Each record:
+- `batchId`, `question`, `answer`, `hasContext`
+- `targetSession`, `windowIndex`, `sourceSession`
+- `strategy`, `model`
+- `inputTokens`, `outputTokens`, `cacheCreationInputTokens`, `cacheReadInputTokens`
+- `latencyMs`, `timestamp`
+
+Logging is best-effort (failures don't break queries).
+
+## MCP Progress Notifications
+
+During batch queries, progress notifications are sent via MCP's standard
+`progressToken` mechanism. Each completed session window sends a notification
+with `{ progress: completed, total: totalWindows }`. Requires the caller to
+include `_meta.progressToken` in the request.
+
 ## Known Gaps
 
 ### MCP Server Instructions
@@ -172,22 +200,32 @@ Compaction logic is tested with synthetic fixtures only.
 - **Subagent transcripts**: `<project-dir>/<session-id>/subagents/<subdir>/agent-<id>.jsonl`
 - **Tool results**: `<project-dir>/<session-id>/tool-results/<id>.txt`
 - **Memory**: `<project-dir>/memory/MEMORY.md`
+- **Query log**: `~/.claude/duncan.jsonl`
 
 ## MCP Server
 
-Two tools exposed via stdio transport:
+Three tools exposed via stdio transport:
 
 ### duncan_query
 Query dormant sessions. Parameters:
 - `question` (required): the question to ask
-- `mode` (required): `project`, `global`, `session`, `self`, `ancestors`
-- `projectDir`: for project mode
+- `mode` (required): `project`, `global`, `session`, `self`, `ancestors`, `subagents`, `branch`
+- `projectDir`: for project/branch mode
 - `sessionId`: for session mode
 - `cwd`: working directory context
 - `limit`: max sessions/windows (default: 10)
 - `offset`: pagination offset
 - `copies`: for self mode, number of samples (default: 3)
 - `includeSubagents`: include subagent transcripts (default: false)
+- `batchSize`: max concurrent API calls per batch (default: 5)
+- `gitBranch`: for branch mode, explicit branch name
+
+### duncan_projects
+List all CC projects with metadata. Parameters:
+- `limit`: max projects (default: 50)
+- `offset`: pagination offset
+
+Returns: project cwd, session count, last activity, git branches.
 
 ### duncan_list_sessions
 List available sessions. Parameters:

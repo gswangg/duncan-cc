@@ -19,7 +19,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { processSessionFile, processSessionWindows } from "./pipeline.js";
-import { resolveSessionFiles, resolveSessionFilesExcludingSelf, getProjectsDir, listAllSessionFiles } from "./discovery.js";
+import { resolveSessionFiles, resolveSessionFilesExcludingSelf, getProjectsDir, listAllSessionFiles, listProjects, extractGitBranch } from "./discovery.js";
 import { querySingleWindow, queryBatch, querySelf, queryAncestors, querySubagents } from "./query.js";
 
 // ============================================================================
@@ -27,7 +27,7 @@ import { querySingleWindow, queryBatch, querySelf, queryAncestors, querySubagent
 // ============================================================================
 
 const server = new Server(
-  { name: "duncan-cc", version: "0.1.0" },
+  { name: "duncan-cc", version: "0.2.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -52,14 +52,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           mode: {
             type: "string",
-            enum: ["project", "global", "session", "self", "ancestors", "subagents"],
+            enum: ["project", "global", "session", "self", "ancestors", "subagents", "branch"],
             description:
               "Routing mode. 'project': sessions from a specific project dir. " +
               "'global': all sessions across all projects (newest first). " +
               "'session': a specific session file. " +
               "'self': query own active window N times for sampling diversity. " +
               "'ancestors': query own prior compaction windows (excluding active). " +
-              "'subagents': query subagent transcripts of the active session.",
+              "'subagents': query subagent transcripts of the active session. " +
+              "'branch': sessions from the same project that share the current git branch.",
           },
           projectDir: {
             type: "string",
@@ -93,8 +94,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "number",
             description: "Max concurrent API calls per batch (default: 5).",
           },
+          gitBranch: {
+            type: "string",
+            description: "For 'branch' mode: explicit git branch name. If omitted, uses the calling session's branch.",
+          },
         },
         required: ["question", "mode"],
+      },
+    },
+    {
+      name: "duncan_projects",
+      description:
+        "List all Claude Code projects with metadata. Use to discover what projects exist " +
+        "before targeting a specific project with duncan_query. Returns project directories, " +
+        "session counts, last activity timestamps, and git branches.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          limit: {
+            type: "number",
+            description: "Max projects to list (default: 50).",
+          },
+          offset: {
+            type: "number",
+            description: "Pagination offset (default: 0).",
+          },
+        },
+        required: [],
       },
     },
     {
@@ -135,11 +161,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args, _meta } = request.params;
 
   // CC passes tool_use ID in _meta — used for self-exclusion
-  const toolUseId = (_meta as Record<string, unknown> | undefined)?.["claudecode/toolUseId"] as string | undefined;
+  const meta = _meta as Record<string, unknown> | undefined;
+  const toolUseId = meta?.["claudecode/toolUseId"] as string | undefined;
+  const progressToken = meta?.progressToken as string | number | undefined;
 
   switch (name) {
     case "duncan_query":
-      return handleDuncanQuery(args as any, toolUseId);
+      return handleDuncanQuery(args as any, toolUseId, progressToken);
+    case "duncan_projects":
+      return handleListProjects(args as any);
     case "duncan_list_sessions":
       return handleListSessions(args as any);
     default:
@@ -149,6 +179,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
   }
 });
+
+/**
+ * Send an MCP progress notification if a progressToken was provided.
+ */
+async function sendProgress(progressToken: string | number | undefined, progress: number, total: number): Promise<void> {
+  if (progressToken === undefined) return;
+  try {
+    await server.notification({
+      method: "notifications/progress",
+      params: { progressToken, progress, total },
+    });
+  } catch {
+    // Best-effort — don't let progress notifications break queries
+  }
+}
 
 async function handleDuncanQuery(args: {
   question: string;
@@ -161,7 +206,8 @@ async function handleDuncanQuery(args: {
   includeSubagents?: boolean;
   copies?: number;
   batchSize?: number;
-}, toolUseId?: string) {
+  gitBranch?: string;
+}, toolUseId?: string, progressToken?: string | number) {
   try {
     // Self mode: query own active window N times for sampling diversity
     if (args.mode === "self") {
@@ -176,6 +222,7 @@ async function handleDuncanQuery(args: {
         copies: args.copies ?? 3,
         batchSize: args.batchSize,
         apiKey: undefined,
+        onProgress: (completed, total) => sendProgress(progressToken, completed, total),
       });
 
       if (result.results.length === 0) {
@@ -210,6 +257,7 @@ async function handleDuncanQuery(args: {
         offset: args.offset ?? 0,
         batchSize: args.batchSize,
         apiKey: undefined,
+        onProgress: (completed, total) => sendProgress(progressToken, completed, total),
       });
 
       if (result.results.length === 0) {
@@ -254,6 +302,7 @@ async function handleDuncanQuery(args: {
         offset: args.offset ?? 0,
         batchSize: args.batchSize,
         apiKey: undefined,
+        onProgress: (completed, total) => sendProgress(progressToken, completed, total),
       });
 
       if (result.results.length === 0) {
@@ -301,11 +350,13 @@ async function handleDuncanQuery(args: {
         limit: args.limit ?? 10,
         offset: args.offset ?? 0,
         includeSubagents: args.includeSubagents ?? false,
-        toolUseId, // for self-exclusion
+        toolUseId, // for self-exclusion + branch detection
+        gitBranch: args.gitBranch,
       },
       {
         apiKey: undefined,
         batchSize: args.batchSize,
+        onProgress: (completed, total) => sendProgress(progressToken, completed, total),
       },
     );
 
@@ -355,6 +406,37 @@ async function handleDuncanQuery(args: {
   } catch (err: any) {
     return {
       content: [{ type: "text", text: `Duncan query error: ${err.message}` }],
+      isError: true,
+    };
+  }
+}
+
+async function handleListProjects(args: {
+  limit?: number;
+  offset?: number;
+}) {
+  try {
+    const result = listProjects({ limit: args.limit, offset: args.offset });
+
+    if (result.projects.length === 0) {
+      return {
+        content: [{ type: "text", text: "No projects found." }],
+      };
+    }
+
+    const lines = result.projects.map((p) => {
+      const date = p.lastActivity.toISOString().slice(0, 16);
+      const branches = p.branches.length > 0 ? p.branches.join(", ") : "—";
+      return `${p.cwd}\n  sessions: ${p.sessionCount}  last: ${date}  branches: ${branches}`;
+    });
+
+    const header = `${result.totalCount} projects${result.hasMore ? ` (showing ${result.projects.length})` : ""}:`;
+    return {
+      content: [{ type: "text", text: `${header}\n\n${lines.join("\n\n")}` }],
+    };
+  } catch (err: any) {
+    return {
+      content: [{ type: "text", text: `Error listing projects: ${err.message}` }],
       isError: true,
     };
   }

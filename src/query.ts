@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { processSessionFile, processSessionWindows, type PipelineResult, type WindowPipelineResult } from "./pipeline.js";
 import { resolveSessionFilesExcludingSelf, findCallingSession, listAllSessionFiles, listSubagentFiles, type RoutingParams, type RoutingResult } from "./discovery.js";
+import { recordQuery, buildLogRecord } from "./query-logger.js";
 
 // ============================================================================
 // OAuth token resolution
@@ -65,7 +66,7 @@ function oauthClientConfig(token: string): ResolvedAuth {
       "accept": "application/json",
       "anthropic-dangerous-direct-browser-access": "true",
       "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
-      "user-agent": "duncan-cc/0.1.0",
+      "user-agent": "duncan-cc/0.2.0",
       "x-app": "cli",
     },
   };
@@ -105,6 +106,13 @@ const DUNCAN_PREFIX = `Answer solely based on the conversation above. If you don
 export interface DuncanResult {
   hasContext: boolean;
   answer: string;
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+  };
+  latencyMs?: number;
 }
 
 export interface DuncanQueryResult {
@@ -190,6 +198,8 @@ export async function querySingleWindow(
     } as any);
   }
 
+  const startTime = Date.now();
+
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const response = await client.messages.create({
       model,
@@ -207,7 +217,13 @@ export async function querySingleWindow(
     if (toolCall) {
       const input = toolCall.input as { hasContext: boolean; answer: string };
       if (typeof input.hasContext === "boolean" && typeof input.answer === "string") {
-        return { hasContext: input.hasContext, answer: input.answer };
+        const latencyMs = Date.now() - startTime;
+        return {
+          hasContext: input.hasContext,
+          answer: input.answer,
+          usage: response.usage as any,
+          latencyMs,
+        };
       }
     }
 
@@ -227,6 +243,35 @@ export async function querySingleWindow(
 }
 
 // ============================================================================
+// Logging Helper
+// ============================================================================
+
+/**
+ * Log all results in a batch to ~/.claude/duncan.jsonl.
+ */
+function logBatchResults(
+  batchResult: DuncanBatchResult,
+  strategy: string,
+  sourceSession: string | null,
+): void {
+  for (const r of batchResult.results) {
+    recordQuery(buildLogRecord({
+      batchId: batchResult.queryId,
+      question: batchResult.question,
+      answer: r.result.answer,
+      hasContext: r.result.hasContext,
+      targetSession: r.sessionId,
+      windowIndex: r.windowIndex,
+      sourceSession,
+      strategy,
+      model: r.model,
+      usage: r.result.usage,
+      latencyMs: r.result.latencyMs ?? 0,
+    }));
+  }
+}
+
+// ============================================================================
 // Batch Query
 // ============================================================================
 
@@ -235,7 +280,7 @@ export async function querySingleWindow(
  */
 export async function queryBatch(
   question: string,
-  routing: RoutingParams & { toolUseId?: string },
+  routing: RoutingParams,
   opts: {
     apiKey?: string;
     model?: string;
@@ -328,7 +373,7 @@ export async function queryBatch(
     results.push(...batchResults);
   }
 
-  return {
+  const batchResult: DuncanBatchResult = {
     queryId,
     question,
     results,
@@ -336,6 +381,8 @@ export async function queryBatch(
     hasMore: resolved.hasMore,
     offset: routing.offset ?? 0,
   };
+  logBatchResults(batchResult, routing.mode, resolved.excludedSessionId);
+  return batchResult;
 }
 
 // ============================================================================
@@ -434,7 +481,9 @@ export async function querySelf(
   // Wave 1: prime the cache with a single query
   results.push(await queryOnce());
   if (opts.signal?.aborted || copies <= 1) {
-    return { queryId, question, results, totalWindows: total, hasMore: false, offset: 0 };
+    const batchResult: DuncanBatchResult = { queryId, question, results, totalWindows: total, hasMore: false, offset: 0 };
+    logBatchResults(batchResult, "self", callingSessionId);
+    return batchResult;
   }
 
   // Wave 2: remaining copies in batches, hitting cached prefix
@@ -449,7 +498,9 @@ export async function querySelf(
     results.push(...batchResults);
   }
 
-  return { queryId, question, results, totalWindows: total, hasMore: false, offset: 0 };
+  const batchResult: DuncanBatchResult = { queryId, question, results, totalWindows: total, hasMore: false, offset: 0 };
+  logBatchResults(batchResult, "self", callingSessionId);
+  return batchResult;
 }
 
 // ============================================================================
@@ -546,7 +597,7 @@ export async function queryAncestors(
     results.push(...batchResults);
   }
 
-  return {
+  const batchResult: DuncanBatchResult = {
     queryId,
     question,
     results,
@@ -554,6 +605,8 @@ export async function queryAncestors(
     hasMore: offset + limit < totalWindows,
     offset,
   };
+  logBatchResults(batchResult, "ancestors", callingSessionId);
+  return batchResult;
 }
 
 // ============================================================================
@@ -652,10 +705,12 @@ export async function querySubagents(
     results.push(...batchResults);
   }
 
-  return {
+  const batchResult: DuncanBatchResult = {
     queryId, question, results, totalWindows,
     hasMore: offset + limit < totalWindows, offset,
   };
+  logBatchResults(batchResult, "subagents", callingSessionId);
+  return batchResult;
 }
 
 // ============================================================================
