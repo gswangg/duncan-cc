@@ -1,612 +1,215 @@
-# Duncan for Claude Code — Exhaustive Source Mapping & Spec
+# Duncan for Claude Code — Spec
 
-Source: CC v2.1.81 (`/tmp/claude-source/2.1.81/src/entrypoints/cli.js`)
+## Overview
 
----
+Duncan-cc replicates CC's full message pipeline to hydrate dormant CC sessions,
+then queries them with questions via the Anthropic API. Exposed as an MCP server
+(stdio transport) with two tools: `duncan_query` and `duncan_list_sessions`.
 
-## Complete Message Pipeline: Disk → API
-
-This is the full pipeline CC follows to turn a session file into an API call. Duncan must replicate everything up to the point where messages are sent, then substitute its own query.
+## Pipeline: Disk → API
 
 ```
 Session file (.jsonl)
   │
   ▼
-G26() — parse JSONL, separate transcript from metadata
+Parse JSONL — separate transcript from metadata
   │
   ▼
-wHY() — preserved segment relinking (compaction tree surgery)
+Preserved segment relinking (compaction tree surgery)
   │
   ▼
-Vs6() — walk parentUuid chain from leaf to root
+Walk parentUuid chain from leaf to root
   │
   ▼
-OHY() — post-process: handle orphan tool results, deduplicate assistant splits
+Post-process: handle orphan tool results, deduplicate assistant splits
   │
   ▼
-Yt1() — strip internal fields (isSidechain, parentUuid)
+Strip internal fields (isSidechain, parentUuid)
   │
   ▼
-[in main loop — PF_() / OS()]
-  │
-  ├── vk() — slice from last compact boundary onward
-  ├── L34() — apply content replacements
-  ├── Kp() — microcompact (truncate old tool results)
-  ├── autocompact check — may trigger compaction
+Slice from last compact boundary onward
   │
   ▼
-HX() — normalize messages for API:
-  ├── fjY() — reorder attachments to be adjacent to their referencing messages
-  ├── filter out: progress messages, non-local-command system messages, API error messages
-  ├── system messages → converted to user messages (F8 wrapper)
-  ├── user messages → strip tool_references (It1/ZjY), merge consecutive users (rb8)
-  ├── assistant messages → remap tool names, merge split assistant messages
-  ├── attachment messages → convert to user messages via sl1(), merge into adjacent user
+Content replacements (persisted-output resolution from tool-results/)
   │
   ▼
-Post-normalization transforms:
-  ├── pn6() — filter orphaned thinking-only assistant messages
-  ├── QjY() — remove trailing thinking blocks from last assistant
-  ├── gn6() — remove whitespace-only assistant messages, merge resulting adjacent users
-  ├── cjY() — fix empty assistant content (add placeholder text)
+Microcompact (truncate old tool results)
   │
   ▼
-aR8() — prepend userContext as <system-reminder> user message
+Normalize messages:
+  ├── Reorder attachments adjacent to referencing messages
+  ├── Filter: progress, non-local system, API error messages
+  ├── System messages → user messages (system-reminder wrapper)
+  ├── Strip tool_references from user messages
+  ├── Merge consecutive same-role messages
+  ├── Merge split assistant messages (same message.id)
+  ├── Convert attachment messages to user messages
+  │
+  ├── Post-transform 1: Relocate deferred tool_reference text
+  ├── Post-transform 2: Filter orphaned thinking-only assistant messages
+  ├── Post-transform 3: Remove trailing thinking from last assistant
+  ├── Post-transform 4: Remove whitespace-only assistants + re-merge users
+  ├── Post-transform 5: Fix empty assistant content (placeholder)
+  ├── Post-transform 6: Reorder system-reminder within tool_results
+  ├── Post-transform 7: Flatten error tool_results (text-only)
+  └── Post-transform 8: Fix orphaned tool_use (synthetic tool_result)
   │
   ▼
-wJY() — add cache_control breakpoints for prompt caching
+Inject userContext (<system-reminder> with CLAUDE.md + date)
   │
   ▼
-ejY()/AJY() — final conversion to API format: {role, content} only
+Build system prompt (full parity with CC):
+  ├── Identity/intro
+  ├── System rules
+  ├── Coding instructions
+  ├── Careful actions guidelines
+  ├── Tool usage (adapted to session's tools)
+  ├── Tone and style
+  ├── Output efficiency
+  ├── Environment info (cwd, platform, model)
+  ├── CLAUDE.md (from session's original cwd)
+  ├── Memory (from project dir MEMORY.md)
+  └── Language preference
   │
   ▼
-messages.create() — API call with system prompt, messages, tools, betas
+Convert to API format: {role, content} only
+  │
+  ▼
+Add cache_control breakpoints:
+  ├── System prompt blocks: ephemeral cache
+  └── Penultimate message: ephemeral cache (session context boundary)
+  │
+  ▼
+Append duncan query as final user message
+  │
+  ▼
+messages.create() with duncan_response tool
 ```
 
----
+## Routing Modes
 
-## 1. Session Storage
+| Mode | Target | Self-exclusion |
+|------|--------|----------------|
+| `project` | All sessions in same project dir | ✅ via toolUseId |
+| `global` | All sessions across all projects | ✅ via toolUseId |
+| `session` | Specific session by ID/path | — |
+| `self` | Own active window, N copies (sampling diversity) | — (queries self intentionally) |
+| `ancestors` | Own prior compaction windows (excluding active) | Active window excluded |
 
-### Paths
-- **Config dir**: `~/.claude/` — `d1()`
-- **Projects dir**: `~/.claude/projects/` — `lx()` = `join(d1(), "projects")`
-- **Project dir**: `~/.claude/projects/<hashed-cwd>/` — `IO(cwd)` = `join(lx(), UM(cwd))`
-- **Session file**: `<project-dir>/<session-id>.jsonl` — `Gv(sessionId)`
-- **Current session**: `WY()` = `join(projectDir, sessionId + ".jsonl")`
-- **Subagent transcripts**: `<project-dir>/<session-id>/subagents/<subdir>/agent-<agent-id>.jsonl` — `DW(agentId)`
-- **Agent metadata**: `.meta.json` adjacent to agent JSONL
+### Self-exclusion
 
-### Session ID
-- Generated by `MB8()` (random UUID)
-- `T8.sessionId` — current session ID
-- `T8.parentSessionId` — set on fork/subagent creation, **not written to session JSONL**
+CC passes `toolUseId` in MCP request `_meta` as `"claudecode/toolUseId"`.
+The assistant message containing that tool_use is written to the session JSONL
+before the tool is invoked (`appendFileSync`). We scan the last 32KB of candidate
+session files for the ID to deterministically identify the calling session.
 
----
+### Self mode
 
-## 2. JSONL Entry Types
+Sends the question to N copies of the active window for sampling diversity.
+Two-wave cache strategy:
+1. Wave 1: 1 query primes the cache (full input cost)
+2. Wave 2: remaining N-1 queries in batches (hit cached prefix)
 
-### Transcript messages — pass `mi()`:
-```
-type: "user" | "assistant" | "attachment" | "system" | "progress"
-```
+### Ancestors mode
 
-### Transcript message structure:
-```typescript
-{
-  uuid: string;
-  parentUuid: string | null;
-  session_id: string;
-  type: "user" | "assistant" | "system" | "progress" | "attachment";
-  timestamp: string;
-  isSidechain?: boolean;
-  parent_tool_use_id?: string | null;
-  gitBranch?: string;
-  teamName?: string;
-  cwd?: string;
-  message: {
-    role: string;
-    content: string | ContentBlock[];
-    model?: string;          // assistant only
-    usage?: Usage;           // assistant only
-    id?: string;             // API response ID, assistant only
-  };
-  // user-specific:
-  isMeta?: boolean;          // meta/system-injected user message
-  isVisibleInTranscriptOnly?: boolean;
-  isCompactSummary?: boolean;
-  toolUseResult?: string;
-  sourceToolAssistantUUID?: string;
-  imagePasteIds?: string[];
-  permissionMode?: string;
-  origin?: { kind: string };
-  // assistant-specific:
-  isApiErrorMessage?: boolean;
-  apiError?: string;
-  requestId?: string;
-  // system-specific:
-  subtype?: string;          // "compact_boundary" | "local_command"
-  content?: string;
-  compactMetadata?: {
-    preservedSegment?: {
-      headUuid: string;
-      tailUuid: string;
-      anchorUuid: string;
-    }
-  };
-  // attachment-specific:
-  attachment?: any;          // attachment data (files, images)
-}
-```
+Queries compaction windows of the calling session excluding the active window.
+Returns nothing if the session has no compaction boundaries. In CC (no dfork
+lineage), "ancestors" = the compacted-away context from the current session.
 
-### Metadata entries (non-transcript):
-```
-type: "summary"               { leafUuid, summary }
-type: "custom-title"          { sessionId, customTitle }
-type: "tag"                   { sessionId, tag }
-type: "agent-name"            { sessionId, agentName }
-type: "agent-color"           { sessionId, agentColor }
-type: "agent-setting"         { sessionId, agentSetting }
-type: "mode"                  { sessionId, mode }
-type: "worktree-state"        { sessionId, worktreeSession }
-type: "pr-link"               { sessionId, prNumber, prUrl, prRepository }
-type: "file-history-snapshot"  { messageId, ... }
-type: "attribution-snapshot"   { messageId, ... }
-type: "content-replacement"    { sessionId|agentId, replacements[] }
-type: "marble-origami-commit"  { ... }
-type: "marble-origami-snapshot" { sessionId, ... }
+## Authentication
+
+Resolution order:
+1. Explicit apiKey/token parameter
+2. CC OAuth credentials (`~/.claude/.credentials.json`)
+3. `ANTHROPIC_API_KEY` environment variable
+
+OAuth requires identity prefix: `"You are Claude Code, Anthropic's official CLI
+for Claude."` as first system block + beta headers
+`claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14`.
+
+## Prompt Caching
+
+Cache breakpoints placed on:
+- **System prompt**: each text block gets `cache_control: { type: "ephemeral" }`
+- **Messages**: breakpoint on last content block of penultimate message
+
+This caches the session context (stable across queries) while letting the duncan
+query question (last message) vary without invalidating cache.
+
+## System Prompt Reconstruction
+
+Static sections embedded verbatim from CC source:
+- Identity/intro, system rules, coding instructions, careful actions,
+  tool usage, tone/style, output efficiency
+
+Dynamic sections reconstructed from session context:
+- **Environment**: from session JSONL metadata (cwd, model) + local filesystem
+- **CLAUDE.md**: from session's original cwd hierarchy (if paths exist)
+- **Memory**: from CC project dir (`~/.claude/projects/<hash>/memory/MEMORY.md`)
+- **Tool instructions**: adapted based on tool names from session's tool_use blocks
+- **Language**: configurable
+
+This matches CC's own resume behavior: rebuild system prompt from current state.
+
+## Parity Verification
+
+Automated extraction pipeline discovers CC's normalize functions by telemetry
+anchor (`tengu_api_before_normalize`), extracts via string search + brace matching
+on prettified source (~4s, no babel needed).
+
+Parity check: 23/23 pass (11 normalize + 12 system prompt).
+
+### Extraction workflow
+```bash
+# Extract + prettify CC source from native binary
+python3 ~/.pi/agent/skills/inspect-claude-source/extract.py --text-only --pretty
+
+# Auto-discover and extract normalize pipeline
+npx tsx scripts/extract-normalize-pipeline.ts
+
+# Compare against duncan-cc implementation
+npx tsx scripts/parity-check.ts
 ```
 
----
-
-## 3. Session Loading — `G26(path, opts?)`
-
-**Line ~413253**
-
-### Large file optimization
-For files > `Sr8` threshold:
-1. `K48(path, size)` — binary search for compaction boundary offset
-2. Pre-boundary: read for metadata only (summaries, titles, tags, etc.)
-3. Post-boundary: read for transcript messages
-4. If no boundary and still large: `vHY()` trims (keeps only post-boundary messages)
-
-### Parse
-`mu(buffer)` — JSONL parser. Splits by newlines, JSON.parse each line. Handles BOM, partial reads for large files.
-
-### Separation
-For each parsed entry:
-- **Transcript** (`mi(entry)` = true):
-  - Skip ephemeral progress (`Ns6(type)`)
-  - Strip `normalizedMessages` from progress data
-  - Add to `messages` Map keyed by `uuid`
-  - If compact boundary (`of(entry)`): reset leaf tracking arrays
-- **Metadata**: add to respective Maps (summaries, titles, tags, etc.)
-
-### Leaf detection
-After parsing:
-1. Build set of all `parentUuid` values
-2. Messages not in that set are leaves
-3. With `tengu_pebble_leaf_prune` flag: walk each leaf up to first user/assistant to find "meaningful" leaves
-
----
-
-## 4. Preserved Segment Relinking — `wHY(messagesMap)`
-
-**Line ~412706**
-
-### Purpose
-When compaction preserves messages (`messagesToKeep`), the tree needs surgery to keep the preserved segment accessible via `parentUuid` walk.
-
-### Data
-Boundary marker stores:
-```typescript
-compactMetadata.preservedSegment: {
-  headUuid: string;     // first preserved message
-  tailUuid: string;     // last preserved message
-  anchorUuid: string;   // the boundary marker's own uuid
-}
-```
-
-### Algorithm
-1. Scan all messages to find the last compact boundary (`of(entry)`)
-2. If no `preservedSegment`, skip
-3. If the boundary is the last compact boundary:
-   a. Walk from `tailUuid` → `headUuid` via `parentUuid` to identify the preserved segment
-   b. **Relink head**: `head.parentUuid = anchorUuid` (preserved segment starts after boundary)
-   c. **Relink followers**: messages that had `parentUuid === anchorUuid` (except head) → `parentUuid = tailUuid` (new messages follow after preserved segment tail)
-   d. **Zero usage**: All assistant messages in preserved segment get `usage` fields zeroed (prevent double-counting tokens)
-4. **Delete pre-boundary**: Remove all messages whose index < boundary index AND not in preserved segment
-
----
-
-## 5. Tree Walk — `Vs6(messagesMap, leafMessage)`
-
-**Line ~412769**
-
-```
-walk parentUuid chain: leaf → leaf.parentUuid → ... → root
-reverse to get root → leaf order
-pass through OHY() for post-processing
-```
-
-Cycle detection: break if uuid already seen.
-
----
-
-## 6. Post-processing — `OHY(messagesMap, chain, visited)`
-
-**Line ~412783**
-
-Handles:
-1. **Split assistant messages**: If two assistant messages have the same `message.id`, they're from the same API response (split by streaming). Merge their content.
-2. **Orphan tool results**: User messages with `tool_result` content blocks that reference tool_use IDs from assistant messages not on the main chain. These get reattached.
-
----
-
-## 7. Field Stripping — `Yt1(messages)`
-
-**Line ~412696**
-
-Removes: `isSidechain`, `parentUuid`. Everything else preserved.
-
----
-
-## 8. Main Loop Pre-processing
-
-### `vk(messages)` — Slice from last compact boundary
-**Line ~418493**
-
-Finds last compact boundary index via `UjY()`, returns `messages.slice(boundaryIndex)`. If no boundary, returns all messages.
-
-**This is critical**: the main loop only sends messages from the last boundary onward. Pre-boundary messages are excluded. This is the runtime equivalent of compaction windowing.
-
-### `L34(messages, contentReplacementState, callback, toolNames)` — Content replacements
-**Line ~206084**
-
-Applies content replacements: tool results can be replaced with persisted output references. Replaces `tool_result` content blocks with `<persisted-output>` markers for tools whose results have been cached.
-
-### `Kp(messages, toolUseContext, forkContext)` — Microcompact
-**Line ~241675**
-
-For resumed sessions with time gaps: truncates old tool results (replaces content with a placeholder) while keeping recent ones intact. Saves tokens without full compaction.
-
-### Autocompact
-Checks if compaction should trigger based on token count. If triggered:
-- Generates summary via API call
-- Creates compaction result with `yl()` structure
-- Replaces messages array with compacted version
-
----
-
-## 9. Message Normalization — `HX(messages, tools)`
-
-**Line ~416964**
-
-This is the core normalization that converts internal message format to API-compatible format.
-
-### Pre-step: `fjY(messages)` — Attachment reordering
-Moves `attachment` entries to be adjacent to the assistant/user message they follow. Attachments that precede an assistant or tool_result user message are placed before it.
-
-### Filtering
-Removes:
-- `progress` messages (all of them)
-- `system` messages where `!gp1(entry)` — i.e., non-local-command system messages are removed. Only `subtype: "local_command"` system messages survive.
-- API error messages (`Lt1(entry)` — assistant messages with `isApiErrorMessage === true` and model `X_6`)
-
-**Important**: Compact boundary messages (`subtype: "compact_boundary"`) are NOT `subtype: "local_command"`, so they are **filtered out** by `HX`. The boundary marker itself doesn't make it to the API — only the messages after it do (because `vk()` already sliced from the boundary).
-
-### Type mapping:
-- **`system` (local_command only)** → Converted to user message via `F8({ content: system.content })`. Merged with previous user if adjacent.
-- **`user`** → Strip tool_references (`It1` or `ZjY`), add trailing marker if has tool_references. Merge with previous user if adjacent (`rb8`).
-- **`assistant`** → Remap tool names to canonical names. Merge split messages (same `message.id`).
-- **`attachment`** → Convert to user message content blocks via `sl1(attachment)`, merge into adjacent user.
-
-### Post-normalization:
-1. **`pn6()`** — Filter orphaned thinking-only assistant messages (thinking blocks with no corresponding non-thinking content, unless the message ID matches a non-thinking assistant)
-2. **`QjY()`** — Remove trailing thinking blocks from the last assistant message
-3. **`gn6()`** — Remove whitespace-only assistant messages, merge resulting adjacent user messages
-4. **`cjY()`** — Fix empty assistant content arrays (add placeholder text `"[No message content]"`)
-
----
-
-## 10. Final API Format — `ejY()` / `AJY()`
-
-**Line ~419421 / ~419451**
-
-Strip everything except `{role, content}`:
-- **User**: `{ role: "user", content: message.content }` (with optional `cache_control`)
-- **Assistant**: `{ role: "assistant", content: message.content }` (with optional `cache_control`, never on thinking blocks)
-
-All internal fields (`uuid`, `type`, `timestamp`, `isMeta`, `toolUseResult`, `sourceToolAssistantUUID`, etc.) are dropped.
-
----
-
-## 11. System Prompt
-
-The system prompt is assembled from multiple sources at runtime and NOT stored in the session file. For duncan queries, we should NOT attempt to reconstruct it — instead use a minimal duncan-specific system prompt.
-
-Key components (for reference):
-- Base instructions (hardcoded)
-- CLAUDE.md (project, user, local)
-- MEMORY.md content
-- Tool descriptions
-- Agent-specific prompts
-- Mode-specific modifications
-- Context from `userContext` injected via `aR8()` as `<system-reminder>`
-
----
-
-## 12. Compaction Details
-
-### Boundary marker
-```javascript
-function of(A) {
-  return A?.type === "system" && A.subtype === "compact_boundary";
-}
-```
-
-### Compaction result (written to session + applied at runtime):
-```typescript
-{
-  boundaryMarker: Message;          // compact_boundary system message
-  summaryMessages: Message[];       // summary content (user messages with isMeta/isCompactSummary)
-  messagesToKeep?: Message[];       // preserved messages
-  attachments: Message[];           // attachments preserved across compaction
-  hookResults: Message[];           // PostCompact hook results
-  preCompactTokenCount: number;
-  postCompactTokenCount: number;
-}
-```
-
-### Runtime reconstruction: `yl(result)`
-```javascript
-[result.boundaryMarker, ...result.summaryMessages, ...result.messagesToKeep ?? [], ...result.attachments, ...result.hookResults]
-```
-
-### Summary storage
-Written as separate JSONL entries: `{ type: "summary", leafUuid: "<boundary-uuid>", summary: "<text>" }`
-
----
-
-## 13. Duncan Implementation Plan
-
-### What duncan needs to replicate
-For querying a CC session window, duncan must:
-
-1. **Parse JSONL** — replicate `mu()` (straightforward)
-2. **Separate transcript from metadata** — replicate `mi()` filter + metadata Maps
-3. **Relink preserved segments** — replicate `wHY()` (complex but well-understood)
-4. **Walk tree** — replicate `Vs6()` + `OHY()`
-5. **Slice from boundary** — replicate `vk()` for each window
-6. **Strip fields** — replicate `Yt1()`
-7. **Normalize** — replicate `HX()` transforms:
-   - Filter progress, non-local-command system, API errors
-   - Convert remaining system → user
-   - Handle attachments → user
-   - Merge adjacent same-role messages
-   - Post-normalize (pn6, QjY, gn6, cjY)
-8. **Convert to API format** — replicate `ejY()`/`AJY()` (just extract role + content)
-
-### What duncan can skip
-- `aR8()` — userContext injection (not relevant for duncan queries)
-- `L34()` — content replacements (stored outputs may not be available; use transcript as-is)
-- `Kp()` — microcompact (token optimization for live sessions, not needed for queries)
-- `wJY()` — cache breakpoints (irrelevant for duncan queries)
-- System prompt reconstruction (use duncan's own prompt)
-- Tool schema building
-- Feature flag checks
-
-### Windowing strategy
-Unlike pi where compaction entries create explicit windows, CC's approach is:
-1. Session has 0 or more compact boundaries
-2. Each boundary divides the session into pre-boundary and post-boundary
-3. `vk()` always takes from the **last** boundary
-4. For multiple boundaries, pre-boundary content is accessible via the preserved segment mechanism
-
-For duncan windowing:
-- **Window 0**: messages before first boundary (raw pre-compaction content, if file isn't trimmed)
-- **Window N**: messages from boundary N-1 through boundary N (including preserved segments and summaries)
-- **Last window**: messages from last boundary to leaf (what `vk()` would return)
-
-**Caveat**: CC's large-file optimization (`Sr8` threshold) may discard pre-boundary content. Duncan reading historical session files may encounter files where pre-boundary messages are already gone from the JSONL. Need to handle gracefully.
-
-### Integration approach: MCP Server
-CC supports MCP natively. Duncan-cc as an MCP server exposes:
-- `duncan_query` tool — query past sessions with routing modes
-- System reads CC session files directly from `~/.claude/projects/`
-
-### Session discovery
-- Enumerate `~/.claude/projects/<hashed-cwd>/*.jsonl`
-- Sort by mtime for temporal routing
-- Subagents in `<session-id>/subagents/` subdirectories
-- No explicit parent-child links in files — use temporal ordering and directory structure
-
----
-
-## 14. Key Differences from Pi
-
-| Aspect | Pi | CC |
-|--------|-----|-----|
-| IDs | `id` / `parentId` | `uuid` / `parentUuid` |
-| Compaction entry | `type: "compaction"` + inline summary + `firstKeptEntryId` | `type: "system", subtype: "compact_boundary"` + separate `type: "summary"` entries + `preservedSegment` relinking |
-| Message types | `message`, `compaction`, `model_change`, `branch_summary`, `label`, `custom` | `user`, `assistant`, `system`, `progress`, `attachment` + 12 metadata types |
-| Normalization | `convertToLlm()` — straightforward role mapping | `HX()` — complex: filter, merge, reorder, strip, post-process |
-| Runtime slicing | `buildSessionContext()` respects `firstKeptEntryId` | `vk()` slices from last boundary; `wHY()` relinks preserved segments |
-| Session dir | `~/.pi/agent/sessions/<hashed-cwd>/` | `~/.claude/projects/<hashed-cwd>/` |
-| Parent links | Explicit `parentSession` in header | Not in session file |
-| Provider | Multi-provider (Anthropic, Google, etc.) | Single provider (Anthropic) |
-
----
-
-## 15. Remaining Questions
-
-1. **`sl1()` attachment conversion**: How exactly are attachments converted to user message content? Need to trace for image, file, and document attachments.
-
-2. **`rb8()` user message merging**: What's the exact merge strategy? Concatenate content arrays?
-
-3. **Marble-origami (context collapse)**: Does this create additional boundaries or modify the tree in ways distinct from compaction?
-
-4. **`Sr8` threshold value**: What's the exact byte threshold for large-file optimization? (Determines whether pre-boundary content is available.)
-
-5. **Subagent tree structure**: Are subagent messages reachable via `parentUuid` from the main session, or completely independent trees?
-
----
-
-## Appendix: Resolved Questions
-
-### A1. Attachment conversion (`sl1`)
-Attachments are converted to synthetic tool-use pairs:
-- **file (text)**: Read tool call + result
-- **file (image)**: Read tool call + image content blocks
-- **file (pdf)**: Read tool call + pdf result
-- **directory**: ls command + stdout result
-- **edited_text_file**: meta user message with diff snippet
-- **selected_lines_in_ide**: meta user message with selection
-- **opened_file_in_ide**: meta user message noting file open
-- **plan_file_reference**: meta user message with plan content
-- **invoked_skills**: meta user message with skill content
-- **teammate_mailbox**: formatted teammate messages
-- **team_context**: team coordination system-reminder
-- **compact_file_reference**: note that file was read before compaction, too large to include
-- **pdf_reference**: note about large PDF with instructions to use tool
-- **todo_reminder**: numbered todo list
-
-All wrapped in `z3()` which sanitizes text content via `vv()`.
-
-### A2. User message merging (`rb8`)
-Merges two user messages by concatenating their content arrays. Tool results are ordered before text content via `uyq()`. The merged message keeps the first message's fields, except: if the first is `isMeta`, uses the second's `uuid`.
-
-### A3. Large file threshold (`Sr8`)
-`Sr8 = 5242880` (5MB). Files larger than this trigger the optimization that reads only post-boundary content for transcript messages.
-
-### A4. Ephemeral progress types (`Ns6`)
-```javascript
-Set(["bash_progress", "powershell_progress", "mcp_progress"])
-```
-These progress messages are filtered during session loading.
-
-### A5. Marble-origami (context collapse)
-Metadata-only entries. Not transcript messages, don't pass `mi()`, don't affect the message tree, don't create boundaries. Stored for session metadata but irrelevant to duncan's message reconstruction.
-
-### A6. Subagent sessions
-Completely independent JSONL files in subdirectories. Not reachable via `parentUuid` from main session. Discoverable by directory structure: `<session-id>/subagents/`.
-
-### A7. Compact boundary filtering in `HX()`
-**Critical finding**: compact boundary messages (`subtype: "compact_boundary"`) are filtered OUT by `HX()` because they are `type: "system"` but not `subtype: "local_command"`. Only `local_command` system messages pass through. The boundary itself never reaches the API. `vk()` already sliced from the boundary, so the boundary's role is purely structural (tree surgery anchor point).
-
----
-
-## 16. Full Replication Requirements
-
-Everything that affects what the model sees must be replicated. Only mechanical/caching concerns can be skipped.
-
-### MUST replicate:
-1. **Session parsing** — `mu()`, `mi()`, `Ns6()` filter
-2. **Preserved segment relinking** — `wHY()` 
-3. **Tree walk** — `Vs6()` + `OHY()`
-4. **Field stripping** — `Yt1()`
-5. **Boundary slicing** — `vk()`
-6. **Content replacements** — `L34()` / `pI9()` — apply persisted output replacements from `type: "content-replacement"` entries
-7. **Microcompact** — `Kp()` / `Oe9()` — truncate old tool results for sessions with time gaps
-8. **Message normalization** — `HX()` — filter, type conversion, merging, attachment conversion, post-transforms (pn6, QjY, gn6, cjY)
-9. **userContext injection** — `aR8()` — prepend CLAUDE.md content + currentDate as `<system-reminder>`
-10. **System prompt reconstruction** — full chain:
-    - Base: `sH8()` → `"You are Claude Code, Anthropic's official CLI for Claude."`
-    - Agent notes: `dQ6()` → agent thread notes, emoji prohibition, path conventions
-    - Environment: `Sr9()` → working directory, platform, OS, model name, knowledge cutoff
-    - CLAUDE.md: `bO()` → loads from multiple sources:
-      - Managed CLAUDE.md (from settings)
-      - Managed rules directory
-      - User CLAUDE.md + rules directory (if userSettings allowed)
-      - Project CLAUDE.md: walks from cwd up to root, loading `CLAUDE.md`, `.claude/CLAUDE.md`, `.claude/rules/` at each level
-      - Local CLAUDE.md: `CLAUDE.local.md` at each level
-      - Additional directories CLAUDE.md
-      - AutoMem (MEMORY.md) if enabled
-      - TeamMem if enabled
-    - Format: `FE1()` wraps each source with type label (project instructions, user instructions, etc.)
-    - Header: `"Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written."`
-11. **systemContext injection** — `cYq()` appends git status to system prompt array
-12. **API format conversion** — `ejY()`/`AJY()` — extract `{role, content}` only
-
-### CAN skip:
-1. **Cache breakpoints** — `wJY()` — `cache_control` markers, no semantic effect
-2. **Tool schema building** — duncan uses its own `duncan_response` tool
-3. **Feature flag checks** — use sensible defaults
-4. **Telemetry** — `Q()` calls throughout
-5. **Attribution header** — `tH8()` — billing metadata
-
-### System prompt reconstruction strategy
-
-For duncan queries against CC sessions:
-1. Read CLAUDE.md files from disk using the same path resolution CC uses (cwd walk, user dir, managed dir)
-2. If files have changed since the session, we get the current version — acceptable tradeoff since we can't reconstruct the historical version without snapshots
-3. Assemble using the same template structure (`dQ6` + `Sr9` + `FE1`)
-4. Include environment info (cwd, platform, OS)
-5. Model name comes from the session's assistant messages
-
-### Content replacement strategy
-
-Content replacements are stored in the session JSONL as `type: "content-replacement"` entries. Each has:
-- `sessionId` or `agentId` — scope
-- `replacements[]` — array of `{ kind: "tool-result", toolUseId, replacement }` 
-
-The replacement function `pI9()` also reads persisted outputs from disk (`gI9()`). For duncan:
-1. Apply replacements from the session's `content-replacement` entries
-2. If persisted output files exist on disk, apply those too
-3. If files are missing, use the original content — it's more info, not less
-
-### Microcompact strategy
-
-`Kp()` truncates old tool results when resuming after a time gap (> threshold minutes). For duncan:
-1. Check the time gap between the last assistant message and the current time
-2. If gap exceeds threshold, apply microcompact (replace old tool_result content with placeholder)
-3. Keep recent tool results intact
-
-This is important because without it, a session with many large tool results could exceed the context window.
-
----
-
-## Parity Gaps & Design Decisions (updated 2026-03-27)
+## Known Gaps
 
 ### MCP Server Instructions
-**Gap**: CC injects MCP server `instructions` (from the initialize handshake) into the
-system prompt. Duncan cannot reconstruct these because:
-1. Instructions are fetched live from running MCP servers during connection
-2. CC does not cache/persist them on disk
-3. For dormant sessions, the servers may not be available (different machine, server stopped)
+CC injects MCP server `instructions` from the initialize handshake into the system
+prompt. Cannot reconstruct for dormant sessions — instructions are fetched live and
+not persisted to disk. Equivalent to resuming a CC session with tools disconnected.
 
-**Impact**: Equivalent to resuming a CC session with MCP tools disconnected — the model
-loses context about how to use MCP-provided tools. Low impact for duncan's query use case
-since we're reading conversation context, not invoking tools.
+### Compaction Test Coverage
+No real CC sessions with compaction boundaries in the test corpus (CC's 30-day
+`cleanupPeriodDays` default purged older sessions before the corpus was captured).
+Compaction logic is tested with synthetic fixtures only.
 
-**Analysis**: A `SessionStart` hook was considered but hooks don't have access to MCP
-connection state. Connecting to servers ourselves would require starting them, which is
-heavy and may not be possible for remote sessions. This gap is accepted.
+## Session Storage
 
-### Prompt Caching
-**Status**: Not yet implemented. CC uses `cache_control` breakpoints on:
-- System prompt sections (scope: "ephemeral", optional ttl: "1h", optional scope: "global"/"org")
-- Last content block of the last message (ephemeral breakpoint)
-- Tool result blocks in earlier messages get `cache_reference` for deduplication
+- **Config dir**: `~/.claude/`
+- **Projects dir**: `~/.claude/projects/`
+- **Project dir**: `~/.claude/projects/<hashed-cwd>/` (cwd with `/` → `-`)
+- **Session file**: `<project-dir>/<session-id>.jsonl`
+- **Subagent transcripts**: `<project-dir>/<session-id>/subagents/<subdir>/agent-<id>.jsonl`
+- **Tool results**: `<project-dir>/<session-id>/tool-results/<id>.txt`
+- **Memory**: `<project-dir>/memory/MEMORY.md`
 
-**Impact**: Without caching, each duncan query pays full input token cost for the session
-context. With caching, repeated queries against the same session within the TTL window
-would reuse cached context. Significant cost savings for multi-query workflows.
+## MCP Server
 
-**Plan**: Add cache_control breakpoints matching CC's strategy:
-1. System prompt: ephemeral cache on each section
-2. Messages: breakpoint on the last content block of the penultimate user message
-3. This ensures the session context caches while the duncan query question varies
+Two tools exposed via stdio transport:
 
-### Session State Reconstruction
-Duncan reconstructs system prompt from:
-- **Static sections**: Embedded verbatim from CC 2.1.85 source (identity, system rules,
-  coding instructions, careful actions, tool usage, tone/style, output efficiency)
-- **Environment**: From session JSONL metadata (cwd, model) + local filesystem state
-- **CLAUDE.md**: From session's original cwd hierarchy (if paths exist on this machine)
-- **Memory**: From CC project dir (`~/.claude/projects/<hash>/memory/MEMORY.md`)
-- **Tool instructions**: Adapted based on tool names extracted from session's tool_use blocks
-- **Language**: Configurable, not auto-detected from session
+### duncan_query
+Query dormant sessions. Parameters:
+- `question` (required): the question to ask
+- `mode` (required): `project`, `global`, `session`, `self`, `ancestors`
+- `projectDir`: for project mode
+- `sessionId`: for session mode
+- `cwd`: working directory context
+- `limit`: max sessions/windows (default: 10)
+- `offset`: pagination offset
+- `copies`: for self mode, number of samples (default: 3)
+- `includeSubagents`: include subagent transcripts (default: false)
 
-This matches CC's behavior when resuming a session: CC rebuilds the system prompt from
-current state, not from the original session's prompt. Duncan does the same, using the
-project directory as the source of truth for dynamic context.
+### duncan_list_sessions
+List available sessions. Parameters:
+- `mode` (required): `project`, `global`
+- `projectDir`, `cwd`, `limit`
