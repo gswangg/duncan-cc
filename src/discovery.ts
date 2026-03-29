@@ -148,6 +148,8 @@ export function listSubagentFiles(sessionFile: string): SessionFileInfo[] {
     scanDir(sessionDir);
   } catch {}
 
+  // Sort by mtime, newest first (deterministic ordering)
+  files.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
   return files;
 }
 
