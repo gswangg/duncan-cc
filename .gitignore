@@ -9,3 +9,4 @@ scripts/extracted/
 
 # System prompt extractions — regenerable
 scripts/extracted/_sysprompt_*
+scripts/
