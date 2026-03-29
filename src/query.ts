@@ -11,7 +11,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { processSessionFile, processSessionWindows, type PipelineResult, type WindowPipelineResult } from "./pipeline.js";
-import { resolveSessionFilesExcludingSelf, findCallingSession, listAllSessionFiles, type RoutingParams, type RoutingResult } from "./discovery.js";
+import { resolveSessionFilesExcludingSelf, findCallingSession, listAllSessionFiles, listSubagentFiles, type RoutingParams, type RoutingResult } from "./discovery.js";
 
 // ============================================================================
 // OAuth token resolution
@@ -553,6 +553,108 @@ export async function queryAncestors(
     totalWindows,
     hasMore: offset + limit < totalWindows,
     offset,
+  };
+}
+
+// ============================================================================
+// Subagents Query — subagent transcripts of the active session
+// ============================================================================
+
+/**
+ * Query the calling session's subagent transcripts.
+ */
+export async function querySubagents(
+  question: string,
+  opts: {
+    toolUseId: string;
+    limit?: number;
+    offset?: number;
+    batchSize?: number;
+    apiKey?: string;
+    model?: string;
+    signal?: AbortSignal;
+    onProgress?: (completed: number, total: number) => void;
+  },
+): Promise<DuncanBatchResult> {
+  const queryId = randomUUID();
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+
+  const allSessions = listAllSessionFiles();
+  const callingSessionId = findCallingSession(opts.toolUseId, allSessions);
+  if (!callingSessionId) {
+    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset };
+  }
+
+  const session = allSessions.find(s => s.sessionId === callingSessionId);
+  if (!session) {
+    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset };
+  }
+
+  const subagentFiles = listSubagentFiles(session.path);
+  if (subagentFiles.length === 0) {
+    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset };
+  }
+
+  // Expand subagent files to windows
+  const allTargets: Array<{ sessionFile: string; sessionId: string; pipeline: WindowPipelineResult }> = [];
+  for (const sub of subagentFiles) {
+    try {
+      const windows = processSessionWindows(sub.path);
+      for (const w of windows) {
+        if (w.messages.length === 0) continue;
+        allTargets.push({ sessionFile: sub.path, sessionId: sub.sessionId, pipeline: w });
+      }
+    } catch {}
+  }
+
+  if (allTargets.length === 0) {
+    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset };
+  }
+
+  const totalWindows = allTargets.length;
+  const page = allTargets.slice(offset, offset + limit);
+
+  const batchSize = opts.batchSize ?? 5;
+  const results: DuncanQueryResult[] = [];
+  let completed = 0;
+
+  for (let i = 0; i < page.length; i += batchSize) {
+    if (opts.signal?.aborted) break;
+    const batch = page.slice(i, i + batchSize);
+    const batchResults = await Promise.all(
+      batch.map(async (target) => {
+        try {
+          const result = await querySingleWindow(target.pipeline, question, {
+            apiKey: opts.apiKey,
+            model: opts.model ?? target.pipeline.modelInfo?.modelId,
+            signal: opts.signal,
+          });
+          completed++;
+          opts.onProgress?.(completed, page.length);
+          return {
+            queryId, sessionFile: target.sessionFile, sessionId: target.sessionId,
+            windowIndex: target.pipeline.windowIndex,
+            model: target.pipeline.modelInfo?.modelId ?? "unknown", result,
+          };
+        } catch (err: any) {
+          completed++;
+          opts.onProgress?.(completed, page.length);
+          return {
+            queryId, sessionFile: target.sessionFile, sessionId: target.sessionId,
+            windowIndex: target.pipeline.windowIndex,
+            model: target.pipeline.modelInfo?.modelId ?? "unknown",
+            result: { hasContext: false, answer: `Error: ${err.message}` },
+          };
+        }
+      }),
+    );
+    results.push(...batchResults);
+  }
+
+  return {
+    queryId, question, results, totalWindows,
+    hasMore: offset + limit < totalWindows, offset,
   };
 }
 

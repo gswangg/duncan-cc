@@ -20,7 +20,7 @@ import {
 
 import { processSessionFile, processSessionWindows } from "./pipeline.js";
 import { resolveSessionFiles, resolveSessionFilesExcludingSelf, getProjectsDir, listAllSessionFiles } from "./discovery.js";
-import { querySingleWindow, queryBatch, querySelf, queryAncestors } from "./query.js";
+import { querySingleWindow, queryBatch, querySelf, queryAncestors, querySubagents } from "./query.js";
 
 // ============================================================================
 // Server setup
@@ -52,13 +52,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           mode: {
             type: "string",
-            enum: ["project", "global", "session", "self", "ancestors"],
+            enum: ["project", "global", "session", "self", "ancestors", "subagents"],
             description:
               "Routing mode. 'project': sessions from a specific project dir. " +
               "'global': all sessions across all projects (newest first). " +
               "'session': a specific session file. " +
               "'self': query own active window N times for sampling diversity. " +
-              "'ancestors': query own prior compaction windows (excluding active).",
+              "'ancestors': query own prior compaction windows (excluding active). " +
+              "'subagents': query subagent transcripts of the active session.",
           },
           projectDir: {
             type: "string",
@@ -228,6 +229,56 @@ async function handleDuncanQuery(args: {
 
       const contextCount = withContext.length;
       parts.push(`\n\n*${contextCount}/${result.results.length} windows had relevant context. queryId: ${result.queryId}*`);
+
+      return { content: [{ type: "text", text: parts.join("") }] };
+    }
+
+    // Subagents mode: query subagent transcripts of the calling session
+    if (args.mode === "subagents") {
+      if (!toolUseId) {
+        return {
+          content: [{ type: "text", text: "Subagents mode requires toolUseId from _meta (only available when called from CC)." }],
+          isError: true,
+        };
+      }
+      const result = await querySubagents(args.question, {
+        toolUseId,
+        limit: args.limit ?? 50,
+        offset: args.offset ?? 0,
+        apiKey: undefined,
+      });
+
+      if (result.results.length === 0) {
+        return {
+          content: [{ type: "text", text: "No subagent transcripts found for this session." }],
+        };
+      }
+
+      const errors = result.results.filter(r => r.result.answer.startsWith("Error: "));
+      const nonErrors = result.results.filter(r => !r.result.answer.startsWith("Error: "));
+      const withContext = nonErrors.filter(r => r.result.hasContext);
+      const relevant = withContext.length > 0 ? withContext : nonErrors.length > 0 ? nonErrors : result.results;
+
+      const answers = relevant.map((r) => {
+        const label = relevant.length === 1 ? "" : `### ${r.sessionId.slice(0, 20)} (window ${r.windowIndex})\n`;
+        return `${label}${r.result.answer}\n*— ${r.model}*`;
+      }).join("\n\n---\n\n");
+
+      const parts = [`**${args.question}**\n\n${answers}`];
+
+      if (errors.length > 0) {
+        const errorLines = errors.map(r => `- ${r.sessionId.slice(0, 20)} (window ${r.windowIndex}): ${r.result.answer}`).join("\n");
+        parts.push(`\n\n---\n**${errors.length} error(s):**\n${errorLines}`);
+      }
+
+      if (result.hasMore) {
+        const nextOffset = (args.offset ?? 0) + (args.limit ?? 50);
+        const remaining = result.totalWindows - nextOffset;
+        parts.push(`\n\n---\n*Queried ${result.results.length} of ${result.totalWindows} windows. ${remaining} more available — call again with offset: ${nextOffset}.*`);
+      }
+
+      const contextCount = withContext.length;
+      parts.push(`\n\n*${contextCount}/${result.results.length} subagent windows had relevant context. queryId: ${result.queryId}*`);
 
       return { content: [{ type: "text", text: parts.join("") }] };
     }

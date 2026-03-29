@@ -155,7 +155,7 @@ export function listSubagentFiles(sessionFile: string): SessionFileInfo[] {
 // Routing
 // ============================================================================
 
-export type RoutingMode = "project" | "global" | "session" | "self" | "ancestors";
+export type RoutingMode = "project" | "global" | "session" | "self" | "ancestors" | "subagents";
 
 export interface RoutingParams {
   mode: RoutingMode;
