@@ -562,3 +562,51 @@ The replacement function `pI9()` also reads persisted outputs from disk (`gI9()`
 3. Keep recent tool results intact
 
 This is important because without it, a session with many large tool results could exceed the context window.
+
+---
+
+## Parity Gaps & Design Decisions (updated 2026-03-27)
+
+### MCP Server Instructions
+**Gap**: CC injects MCP server `instructions` (from the initialize handshake) into the
+system prompt. Duncan cannot reconstruct these because:
+1. Instructions are fetched live from running MCP servers during connection
+2. CC does not cache/persist them on disk
+3. For dormant sessions, the servers may not be available (different machine, server stopped)
+
+**Impact**: Equivalent to resuming a CC session with MCP tools disconnected — the model
+loses context about how to use MCP-provided tools. Low impact for duncan's query use case
+since we're reading conversation context, not invoking tools.
+
+**Analysis**: A `SessionStart` hook was considered but hooks don't have access to MCP
+connection state. Connecting to servers ourselves would require starting them, which is
+heavy and may not be possible for remote sessions. This gap is accepted.
+
+### Prompt Caching
+**Status**: Not yet implemented. CC uses `cache_control` breakpoints on:
+- System prompt sections (scope: "ephemeral", optional ttl: "1h", optional scope: "global"/"org")
+- Last content block of the last message (ephemeral breakpoint)
+- Tool result blocks in earlier messages get `cache_reference` for deduplication
+
+**Impact**: Without caching, each duncan query pays full input token cost for the session
+context. With caching, repeated queries against the same session within the TTL window
+would reuse cached context. Significant cost savings for multi-query workflows.
+
+**Plan**: Add cache_control breakpoints matching CC's strategy:
+1. System prompt: ephemeral cache on each section
+2. Messages: breakpoint on the last content block of the penultimate user message
+3. This ensures the session context caches while the duncan query question varies
+
+### Session State Reconstruction
+Duncan reconstructs system prompt from:
+- **Static sections**: Embedded verbatim from CC 2.1.85 source (identity, system rules,
+  coding instructions, careful actions, tool usage, tone/style, output efficiency)
+- **Environment**: From session JSONL metadata (cwd, model) + local filesystem state
+- **CLAUDE.md**: From session's original cwd hierarchy (if paths exist on this machine)
+- **Memory**: From CC project dir (`~/.claude/projects/<hash>/memory/MEMORY.md`)
+- **Tool instructions**: Adapted based on tool names extracted from session's tool_use blocks
+- **Language**: Configurable, not auto-detected from session
+
+This matches CC's behavior when resuming a session: CC rebuilds the system prompt from
+current state, not from the original session's prompt. Duncan does the same, using the
+project directory as the source of truth for dynamic context.
