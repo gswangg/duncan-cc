@@ -177,19 +177,28 @@ export async function querySingleWindow(
   // Ensure messages alternate correctly (the question might create user→user)
   const fixedMessages = ensureAlternation(messages);
 
+  // Add cache_control breakpoints for prompt caching.
+  // Strategy: cache the session context (stable across queries), let the
+  // duncan query question (last user message) vary without invalidating cache.
+  // Place breakpoint on the last content block of the penultimate message.
+  addCacheBreakpoints(fixedMessages);
+
   // Build system prompt — OAuth requires Claude Code identity prefix
+  // Each section gets cache_control for system prompt caching.
   const systemBlocks: Anthropic.TextBlockParam[] = [];
   if (isOAuth) {
     systemBlocks.push({
       type: "text",
       text: "You are Claude Code, Anthropic's official CLI for Claude.",
-    });
+      cache_control: { type: "ephemeral" },
+    } as any);
   }
   if (pipeline.systemPrompt) {
     systemBlocks.push({
       type: "text",
       text: pipeline.systemPrompt,
-    });
+      cache_control: { type: "ephemeral" },
+    } as any);
   }
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -343,6 +352,43 @@ export async function queryBatch(
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/**
+ * Add cache_control breakpoints to messages for prompt caching.
+ *
+ * Places an ephemeral cache breakpoint on the last content block of the
+ * penultimate message. This caches all session context while allowing
+ * the duncan query (last message) to vary without invalidating the cache.
+ *
+ * Matches CC's caching strategy (sw3/cw3/Qw3) where the last content block
+ * of each message gets cache_control when caching is enabled.
+ */
+function addCacheBreakpoints(messages: Anthropic.MessageParam[]): void {
+  if (messages.length < 2) return;
+
+  // Find the penultimate message (last session context message before the duncan query)
+  const penultimate = messages[messages.length - 2];
+  if (!penultimate) return;
+
+  const content = penultimate.content;
+  if (typeof content === "string") {
+    // Convert to block format to add cache_control
+    penultimate.content = [
+      {
+        type: "text" as const,
+        text: content,
+        cache_control: { type: "ephemeral" as const },
+      } as any,
+    ];
+  } else if (Array.isArray(content) && content.length > 0) {
+    // Add cache_control to the last block
+    const lastBlock = content[content.length - 1] as any;
+    content[content.length - 1] = {
+      ...lastBlock,
+      cache_control: { type: "ephemeral" as const },
+    };
+  }
+}
 
 /** Ensure messages alternate user/assistant */
 function ensureAlternation(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
