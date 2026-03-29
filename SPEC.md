@@ -63,7 +63,7 @@ Build system prompt (full parity with CC):
   ├── System rules
   ├── Coding instructions
   ├── Careful actions guidelines
-  ├── Tool usage (adapted to session's tools)
+  ├── Tool usage
   ├── Tone and style
   ├── Output efficiency
   ├── Environment info (cwd, platform, model)
