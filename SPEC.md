@@ -123,10 +123,6 @@ Resolution order:
 2. CC OAuth credentials (`~/.claude/.credentials.json`)
 3. `ANTHROPIC_API_KEY` environment variable
 
-OAuth requires identity prefix: `"You are Claude Code, Anthropic's official CLI
-for Claude."` as first system block + beta headers
-`claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14`.
-
 ## Prompt Caching
 
 Cache breakpoints placed on:
@@ -140,16 +136,20 @@ query question (last message) vary without invalidating cache.
 
 Static sections embedded verbatim from CC source:
 - Identity/intro, system rules, coding instructions, careful actions,
-  tool usage, tone/style, output efficiency
+  tool usage (conditionally includes per-tool instructions like "use Read
+  instead of cat" based on which tools appear in the session), tone/style,
+  output efficiency
 
 Dynamic sections reconstructed from session context:
 - **Environment**: from session JSONL metadata (cwd, model) + local filesystem
 - **CLAUDE.md**: from session's original cwd hierarchy (if paths exist)
 - **Memory**: from CC project dir (`~/.claude/projects/<hash>/memory/MEMORY.md`)
-- **Tool instructions**: adapted based on tool names from session's tool_use blocks
 - **Language**: configurable
 
 This matches CC's own resume behavior: rebuild system prompt from current state.
+
+Note: tool schemas are NOT included — duncan sends only its own `duncan_response`
+tool. The session's original tools are not callable during a duncan query.
 
 ## Known Gaps
 
