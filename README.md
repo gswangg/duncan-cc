@@ -14,102 +14,77 @@ npm install
 
 ## Authentication
 
-Duncan resolves auth automatically in this order:
+Duncan resolves auth automatically:
 
-1. `ANTHROPIC_API_KEY` environment variable
-2. CC's OAuth credentials (`~/.claude/.credentials.json`)
-3. Pi's OAuth credentials (`~/.pi/agent/auth.json`)
+1. Explicit apiKey/token parameter
+2. CC OAuth credentials (`~/.claude/.credentials.json`)
+3. `ANTHROPIC_API_KEY` environment variable
 
-OAuth tokens use the `claude-code-20250219` and `oauth-2025-04-20` beta headers with the required Claude Code identity system prompt prefix.
-
-## Configure CC to use duncan
-
-Add to your Claude Code MCP config:
+## Configure CC
 
 ```bash
 claude mcp add duncan -- npx tsx /path/to/duncan-cc/src/mcp-server.ts
-```
-
-Or with explicit API key:
-
-```bash
-claude mcp add -e ANTHROPIC_API_KEY=sk-... duncan -- npx tsx /path/to/duncan-cc/src/mcp-server.ts
 ```
 
 ## Tools
 
 ### `duncan_query`
 
-Query past sessions with a question.
-
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `question` | string | ✓ | The question to ask. Be specific and self-contained. |
-| `mode` | string | ✓ | `"project"`, `"global"`, or `"session"` |
-| `projectDir` | string | | For project mode: explicit project dir path |
-| `sessionId` | string | | For session mode: session file path or ID |
-| `cwd` | string | | Working directory for CLAUDE.md resolution |
-| `limit` | number | | Max sessions to query (default: 10) |
-| `offset` | number | | Pagination offset (default: 0) |
-| `includeSubagents` | boolean | | Include subagent transcripts (default: false) |
+| `question` | string | ✓ | The question to ask |
+| `mode` | string | ✓ | `project`, `global`, `session`, `self`, `ancestors` |
+| `projectDir` | string | | For project mode |
+| `sessionId` | string | | For session mode |
+| `cwd` | string | | Working directory for context resolution |
+| `limit` | number | | Max sessions/windows (default: 10) |
+| `offset` | number | | Pagination offset |
+| `copies` | number | | For self mode: sample count (default: 3) |
+| `includeSubagents` | boolean | | Include subagent transcripts |
 
 ### `duncan_list_sessions`
 
-List available sessions before querying.
-
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `mode` | string | ✓ | `"project"` or `"global"` |
-| `projectDir` | string | | For project mode: project dir path |
-| `cwd` | string | | Working directory to resolve project dir |
-| `limit` | number | | Max sessions to list (default: 20) |
+| `mode` | string | ✓ | `project` or `global` |
+| `projectDir` | string | | For project mode |
+| `cwd` | string | | Working directory |
+| `limit` | number | | Max sessions (default: 20) |
+
+## Routing modes
+
+| Mode | Target |
+|------|--------|
+| `project` | Sessions from same project dir (self-excluded) |
+| `global` | All sessions across all projects (self-excluded) |
+| `session` | Specific session by ID or path |
+| `self` | Own active window, queried N times for sampling diversity |
+| `ancestors` | Own prior compaction windows (excluding active) |
 
 ## How it works
 
-Duncan replicates CC's full session-to-API pipeline:
+Duncan replicates CC's full session-to-API pipeline, then substitutes its own query:
 
-1. **Parse JSONL** — read session file, separate transcript from metadata
-2. **Relink preserved segments** — handle compaction tree surgery (`wHY` equivalent)
-3. **Walk tree** — follow `parentUuid` chain from leaf to root (`Vs6` equivalent)
-4. **Post-process** — merge split assistant messages, fix orphan tool results (`OHY` equivalent)
-5. **Normalize messages** — filter progress/system, convert types, merge adjacent, attachment conversion, 4 post-transforms (`HX` equivalent)
-6. **Fix orphaned tool_use** — insert synthetic `tool_result` for interrupted tool calls
-7. **Apply content replacements** — resolve persisted outputs from session metadata and disk
-8. **Microcompact** — truncate old tool results for time-gapped sessions
-9. **Inject context** — CLAUDE.md + date as `<system-reminder>` (`aR8` equivalent)
-10. **System prompt** — base identity + agent notes + environment info (`dQ6`/`Sr9` equivalent)
-11. **Convert to API format** — strip to `{role, content}` (`ejY`/`AJY` equivalent)
-12. **Query** — call Anthropic API with `duncan_response` structured output tool
+1. Parse JSONL session file
+2. Relink preserved segments (compaction tree surgery)
+3. Walk parentUuid chain from leaf to root
+4. Post-process (merge split assistants, fix orphan tool results)
+5. Normalize messages (filter, convert types, merge, 8 post-transforms)
+6. Apply content replacements (persisted outputs from disk)
+7. Microcompact (truncate old tool results)
+8. Inject userContext (CLAUDE.md + date)
+9. Build system prompt (full parity with CC's static sections + dynamic context from project dir)
+10. Convert to API format
+11. Add prompt caching breakpoints
+12. Query with `duncan_response` structured output tool
 
-## Parity status
+Self-exclusion: the calling session is identified by scanning for the MCP `toolUseId` in session file tails — deterministic, zero config, swarm-safe.
 
-Tested against 13 real CC sessions + 193 subagent transcripts + synthetic test sessions.
+## Known gaps
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| JSONL parsing | ✅ | All entry types handled |
-| Tree walk (parentUuid chain) | ✅ | Cycle detection, leaf finding |
-| Preserved segment relinking | ✅ | Synthetic tests pass |
-| Compaction windowing | ✅ | Multi-boundary, model-per-window |
-| Message normalization | ✅ | Filter, merge, type conversion, 4 post-transforms |
-| Split assistant merging | ✅ | Same `message.id` detection |
-| Orphaned tool_use fix | ✅ | Synthetic tool_result insertion |
-| Attachment conversion | ✅ | file, directory, plan, skill, compact_file_reference |
-| Content replacements | ✅ | Metadata entries + persisted output files |
-| Microcompact | ✅ | Time-gap detection, recent turn preservation |
-| System prompt | ✅ | Base + notes + env + CLAUDE.md |
-| userContext injection | ✅ | CLAUDE.md + date |
-| OAuth auth | ✅ | CC + pi OAuth, beta headers, identity prefix |
-| Subagent processing | ✅ | Discovery + full pipeline |
-| API format conversion | ✅ | role + content only |
-| MCP server | ✅ | stdio transport, list + query tools |
-
-### Known gaps
-
-- **Large file optimization**: CC skips pre-boundary content for files >5MB. Duncan reads the full file.
-- **Persisted output hash naming**: One of CC's tool-result file naming schemes uses hashes not tool IDs. Partial resolution.
-- **`OHY` orphan tool result reattachment**: Simplified — handles the common cases but may miss edge cases with complex branching.
-- **Real compacted sessions**: Synthetic tests pass, but no real CC sessions with compaction boundaries in test corpus.
+- **MCP server instructions** — not available for dormant sessions (fetched live, not persisted)
+- **Tool schemas** — only `duncan_response` is sent; session's original tools aren't callable
+- **Compaction test coverage** — synthetic tests only; no real compacted sessions in test corpus
 
 ## Tests
 
@@ -117,9 +92,9 @@ Tested against 13 real CC sessions + 193 subagent transcripts + synthetic test s
 npm test
 ```
 
-5500+ assertions across 8 test files covering parsing, tree walk, normalization, compaction, content replacements, system prompt, pipeline integration, session discovery, and parity.
+Corpus-dependent tests skip gracefully when `testdata/` is absent.
 
 ## Related
 
-- [pi-duncan](https://github.com/gswangg/pi-duncan) — duncan for the [pi](https://github.com/badlogic/pi-mono) coding agent
+- [duncan-pi](https://github.com/gswangg/duncan-pi) — duncan for the [pi](https://github.com/badlogic/pi-mono) coding agent
 - [The Duncan Idaho Approach to Agent Memory](https://gswangg.net/posts/duncan-idaho-agent-memory) — design writeup
