@@ -1,7 +1,7 @@
 /**
  * Content Replacements + Microcompact
  * 
- * Replicates CC's L34() content replacement and Kp() microcompact.
+ * Replicates CC's content replacement and microcompact transforms.
  * 
  * Content replacements: replace large tool_result content with persisted
  * output references. The persisted outputs live in tool-results/ dirs.
@@ -14,7 +14,7 @@ import { join, dirname } from "node:path";
 import type { CCMessage, ParsedSession } from "./parser.js";
 
 // ============================================================================
-// Content Replacements — CC's L34() / pI9()
+// Content Replacements
 // ============================================================================
 
 const PERSISTED_OUTPUT_MARKER = "<persisted-output>";

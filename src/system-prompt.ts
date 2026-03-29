@@ -1,5 +1,5 @@
 /**
- * System Prompt Reconstruction — full parity with CC 2.1.85's U2()
+ * System Prompt Reconstruction — full parity with CC's system prompt builder
  *
  * Rebuilds the system prompt that CC would have sent for a session,
  * using static instruction text extracted from CC source plus dynamic
@@ -28,7 +28,7 @@ const SECURITY_NOTICE =
   "Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: " +
   "pentesting engagements, CTF competitions, security research, or defensive use cases.";
 
-/** m9O — identity and intro */
+/** Identity and intro section */
 function sectionIdentity(hasOutputStyle: boolean): string {
   const styleClause = hasOutputStyle
     ? 'according to your "Output Style" below, which describes how you should respond to user queries.'
@@ -36,7 +36,7 @@ function sectionIdentity(hasOutputStyle: boolean): string {
   return `\nYou are an interactive agent that helps users ${styleClause} Use the instructions below and the tools available to you to assist the user.\n\n${SECURITY_NOTICE}\nIMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.`;
 }
 
-/** p9O — system rules */
+/** System rules section */
 function sectionSystem(toolNames: Set<string>): string {
   const hasSendMessage = [...toolNames].some(n => /SendMessage/i.test(n));
   const items = [
@@ -51,7 +51,7 @@ function sectionSystem(toolNames: Set<string>): string {
   return ["# System", ...items.map(i => ` - ${i}`)].join("\n");
 }
 
-/** B9O — coding instructions / doing tasks */
+/** Coding instructions / doing tasks section */
 function sectionDoingTasks(): string {
   const items = [
     'The user will primarily request you to perform software engineering tasks. These may include solving bugs, adding new functionality, refactoring code, explaining code, and more. When given an unclear or generic instruction, consider it in the context of these software engineering tasks and the current working directory. For example, if the user asks you to change "methodName" to snake case, do not reply with just "method_name", instead find the method in the code and modify the code.',
@@ -74,7 +74,7 @@ function sectionDoingTasks(): string {
   return ["# Doing tasks", ...formatItems(items)].join("\n");
 }
 
-/** g9O — executing actions with care */
+/** Executing actions with care section */
 function sectionCarefulActions(): string {
   return `# Executing actions with care
 
@@ -89,7 +89,7 @@ Examples of the kind of risky actions that warrant user confirmation:
 When you encounter an obstacle, do not use destructive actions as a shortcut to simply make it go away. For instance, try to identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state like unfamiliar files, branches, or configuration, investigate before deleting or overwriting, as it may represent the user's in-progress work. For example, typically resolve merge conflicts rather than discarding changes; similarly, if a lock file exists, investigate what process holds it rather than deleting it. In short: only take risky actions carefully, and when in doubt, ask before acting. Follow both the spirit and letter of these instructions - measure twice, cut once.`;
 }
 
-/** F9O — tool usage instructions */
+/** Tool usage instructions section */
 function sectionToolUsage(toolNames: Set<string>): string {
   const hasRead = toolNames.has("Read");
   const hasEdit = toolNames.has("Edit");
@@ -115,7 +115,7 @@ function sectionToolUsage(toolNames: Set<string>): string {
   return ["# Using your tools", ...formatItems(items.filter(Boolean) as string[])].join("\n");
 }
 
-/** Q9O — tone and style */
+/** Tone and style section */
 function sectionToneAndStyle(): string {
   const items = [
     "Only use emojis if the user explicitly requests it. Avoid using emojis in all communication unless asked.",
@@ -127,7 +127,7 @@ function sectionToneAndStyle(): string {
   return ["# Tone and style", ...items.map(i => ` - ${i}`)].join("\n");
 }
 
-/** c9O — output efficiency */
+/** Output efficiency section */
 function sectionOutputEfficiency(): string {
   return `# Output efficiency
 
@@ -147,7 +147,7 @@ If you can say it in one sentence, don't use three. Prefer short, direct sentenc
 // Dynamic sections — reconstructed from session context
 // ============================================================================
 
-/** n9O — environment info */
+/** Environment info section */
 function sectionEnvironment(opts: {
   cwd: string;
   isGitRepo: boolean;
@@ -281,7 +281,7 @@ export function extractToolNames(messages: CCMessage[]): Set<string> {
 }
 
 // ============================================================================
-// userContext injection — CC's aR8()
+// userContext injection
 // ============================================================================
 
 export function injectUserContext(
@@ -334,7 +334,7 @@ export function injectUserContext(
 }
 
 // ============================================================================
-// Full system prompt assembly — CC's U2() equivalent
+// Full system prompt assembly
 // ============================================================================
 
 export interface SystemPromptOptions {

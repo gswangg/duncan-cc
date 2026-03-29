@@ -1,11 +1,11 @@
 /**
- * CC Message Normalization — HX()/p2() equivalent
+ * CC Message Normalization
  * 
  * Converts internal CC message format to API-compatible format.
  * Handles: filtering, type conversion, merging, attachment conversion,
  * and 8 post-normalization transforms matching CC 2.1.85's chain:
  * 
- * Pipeline: $w3 → filter → type switch → Jw3 → Me8 → Cw3 → Pe8(+fw3) → Iw3 → LV4 → ww3
+ * Pipeline: reorder-attachments → filter → type-switch → post-transforms (8 steps)
  */
 
 import type { CCMessage } from "./parser.js";
@@ -15,7 +15,7 @@ import { isApiErrorMessage, isCompactBoundary, isLocalCommand } from "./parser.j
 // Helpers
 // ============================================================================
 
-/** Make a synthetic user message — CC's F8() */
+/** Make a synthetic user message */
 function makeUserMessage(content: string | any[], opts: Partial<CCMessage> = {}): CCMessage {
   return {
     type: "user",
@@ -39,7 +39,7 @@ function toContentArray(content: string | any[]): any[] {
   return content;
 }
 
-/** Merge two user messages — CC's rb8() */
+/** Merge two user messages */
 function mergeUsers(a: CCMessage, b: CCMessage): CCMessage {
   const aContent = toContentArray(a.message.content);
   const bContent = toContentArray(b.message.content);
@@ -83,7 +83,7 @@ function isWhitespaceOnly(content: any[]): boolean {
 }
 
 // ============================================================================
-// Attachment conversion — CC's sl1()
+// Attachment conversion
 // 
 // For duncan queries, we do a simplified version that preserves the
 // semantic content without needing the full tool definitions.
@@ -204,7 +204,7 @@ function convertAttachment(msg: CCMessage): CCMessage[] {
 }
 
 // ============================================================================
-// Pre-step: Reorder attachments — CC's fjY()
+// Pre-step: Reorder attachments adjacent to referencing messages
 // ============================================================================
 
 function reorderAttachments(messages: CCMessage[]): CCMessage[] {
@@ -267,7 +267,7 @@ function stripToolReferences(msg: CCMessage): CCMessage {
 }
 
 // ============================================================================
-// Main normalization — CC's HX()
+// Main normalization
 // ============================================================================
 
 export function normalizeMessages(messages: CCMessage[]): CCMessage[] {
@@ -359,23 +359,23 @@ export function normalizeMessages(messages: CCMessage[]): CCMessage[] {
     }
   }
 
-  // Post-transforms — matches CC's chain: Jw3 → Me8 → Cw3 → Pe8 → Iw3 → LV4 → fw3 → ww3
+  // Post-transforms (8 steps matching CC pipeline)
   let normalized = result;
-  normalized = relocateDeferredToolRefText(normalized); // Jw3
-  normalized = filterOrphanedThinking(normalized);     // Me8/pn6
-  normalized = removeTrailingThinking(normalized);     // Cw3/QjY
-  normalized = removeWhitespaceAssistant(normalized);  // Pe8/gn6 (includes fw3 re-merge)
-  normalized = fixEmptyAssistantContent(normalized);   // Iw3/cjY
-  normalized = reorderSystemReminders(normalized);     // LV4
-  // fw3 (re-merge consecutive users) is inlined in removeWhitespaceAssistant
-  normalized = flattenErrorToolResults(normalized);    // ww3
+  normalized = relocateDeferredToolRefText(normalized);
+  normalized = filterOrphanedThinking(normalized);    
+  normalized = removeTrailingThinking(normalized);    
+  normalized = removeWhitespaceAssistant(normalized); 
+  normalized = fixEmptyAssistantContent(normalized);  
+  normalized = reorderSystemReminders(normalized);    
+  // re-merge consecutive users is inlined in removeWhitespaceAssistant
+  normalized = flattenErrorToolResults(normalized);   
   normalized = fixOrphanedToolUse(normalized);         // ensure every tool_use has a tool_result
 
   return normalized;
 }
 
 // ============================================================================
-// Post-transform 1: Filter orphaned thinking-only assistant messages — pn6()
+// Post-transform 1: Filter orphaned thinking-only assistant messages
 // ============================================================================
 
 function filterOrphanedThinking(messages: CCMessage[]): CCMessage[] {
@@ -404,7 +404,7 @@ function filterOrphanedThinking(messages: CCMessage[]): CCMessage[] {
 }
 
 // ============================================================================
-// Post-transform 2: Remove trailing thinking from last assistant — QjY()
+// Post-transform 2: Remove trailing thinking from last assistant
 // ============================================================================
 
 function removeTrailingThinking(messages: CCMessage[]): CCMessage[] {
@@ -438,7 +438,7 @@ function removeTrailingThinking(messages: CCMessage[]): CCMessage[] {
 }
 
 // ============================================================================
-// Post-transform 3: Remove whitespace-only assistant messages — gn6()
+// Post-transform 3: Remove whitespace-only assistant messages
 // ============================================================================
 
 function removeWhitespaceAssistant(messages: CCMessage[]): CCMessage[] {
@@ -470,7 +470,7 @@ function removeWhitespaceAssistant(messages: CCMessage[]): CCMessage[] {
 }
 
 // ============================================================================
-// Post-transform 4: Fix empty assistant content — cjY()
+// Post-transform 4: Fix empty assistant content
 // ============================================================================
 
 function fixEmptyAssistantContent(messages: CCMessage[]): CCMessage[] {
@@ -495,7 +495,7 @@ function fixEmptyAssistantContent(messages: CCMessage[]): CCMessage[] {
 }
 
 // ============================================================================
-// Post-transform 5: Relocate deferred tool_reference text — Jw3()
+// Post-transform 5: Relocate deferred tool_reference text
 // Moves text blocks from user messages that contain tool_references into the
 // next user message that has tool_results (but no tool_references itself).
 // This keeps reference context adjacent to the tool output it describes.
@@ -556,7 +556,7 @@ function relocateDeferredToolRefText(messages: CCMessage[]): CCMessage[] {
 }
 
 // ============================================================================
-// Post-transform 6: Reorder system-reminder blocks in tool_results — LV4()
+// Post-transform 6: Reorder system-reminder blocks in tool_results
 // Moves <system-reminder> text blocks from user messages into the last
 // tool_result in that same message, keeping them adjacent to tool output.
 // ============================================================================
@@ -610,7 +610,7 @@ function reorderSystemReminders(messages: CCMessage[]): CCMessage[] {
 }
 
 // ============================================================================
-// Post-transform 7: Flatten error tool_results — ww3()
+// Post-transform 7: Flatten error tool_results
 // Error tool_results that contain non-text blocks (images, etc.) get stripped
 // to text-only content. Prevents sending binary content in error responses.
 // ============================================================================

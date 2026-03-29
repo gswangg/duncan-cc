@@ -360,7 +360,7 @@ export async function queryBatch(
  * penultimate message. This caches all session context while allowing
  * the duncan query (last message) to vary without invalidating the cache.
  *
- * Matches CC's caching strategy (sw3/cw3/Qw3) where the last content block
+ * Matches CC's caching strategy (CC API format functions) where the last content block
  * of each message gets cache_control when caching is enabled.
  */
 function addCacheBreakpoints(messages: Anthropic.MessageParam[]): void {

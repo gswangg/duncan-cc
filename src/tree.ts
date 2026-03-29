@@ -4,7 +4,7 @@
  * Implements tree walk, preserved segment relinking, leaf detection,
  * and post-processing.
  * 
- * Equivalent to CC's wHY() + Vs6() + OHY() + Yt1() + vk()
+ * Equivalent to CC's relink + walk + post-process + strip + slice pipeline
  */
 
 import type { CCMessage, ParsedSession } from "./parser.js";
@@ -176,12 +176,12 @@ export function findBestLeaf(messages: Map<string, CCMessage>): CCMessage | unde
 }
 
 // ============================================================================
-// Tree Walk — CC's Vs6()
+// Tree Walk
 // ============================================================================
 
 /**
  * Walk parentUuid chain from leaf to root, return root→leaf order.
- * Mirrors CC's Vs6() with cycle detection.
+ * Walks the parentUuid chain from leaf to root with cycle detection.
  */
 export function walkChain(messages: Map<string, CCMessage>, leaf: CCMessage): CCMessage[] {
   const chain: CCMessage[] = [];
@@ -203,12 +203,12 @@ export function walkChain(messages: Map<string, CCMessage>, leaf: CCMessage): CC
 }
 
 // ============================================================================
-// Post-processing — CC's OHY()
+// Post-processing
 // ============================================================================
 
 /**
  * Post-process the chain: handle split assistant messages and orphan tool results.
- * Mirrors CC's OHY().
+ * Post-process: handle orphan tool results, deduplicate split assistant messages.
  */
 function postProcessChain(
   messages: Map<string, CCMessage>,
@@ -252,7 +252,7 @@ function postProcessChain(
 }
 
 // ============================================================================
-// Field Stripping — CC's Yt1()
+// Field Stripping — remove internal-only fields
 // ============================================================================
 
 /** Strip internal fields not needed by the API */
@@ -264,7 +264,7 @@ export function stripInternalFields(messages: CCMessage[]): CCMessage[] {
 }
 
 // ============================================================================
-// Boundary Slicing — CC's vk()
+// Boundary Slicing
 // ============================================================================
 
 /** Find last compact boundary index in array */
@@ -275,7 +275,7 @@ function findLastBoundaryIndex(messages: CCMessage[]): number {
   return -1;
 }
 
-/** Slice from last compact boundary onward — CC's vk() */
+/** Slice from last compact boundary onward */
 export function sliceFromBoundary(messages: CCMessage[]): CCMessage[] {
   const idx = findLastBoundaryIndex(messages);
   if (idx === -1) return messages;

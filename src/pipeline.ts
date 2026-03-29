@@ -17,7 +17,7 @@ import { injectUserContext, buildSystemPromptString, extractToolNames, type Syst
 import type { CCMessage } from "./parser.js";
 
 // ============================================================================
-// API Format Conversion — CC's ejY() / AJY()
+// API Format Conversion
 // ============================================================================
 
 interface ApiMessage {
@@ -27,7 +27,7 @@ interface ApiMessage {
 
 /**
  * Convert a CC message to API format — strip everything except role + content.
- * CC's ejY() for user, AJY() for assistant.
+ * Converts internal messages to API format ({role, content} only).
  */
 function toApiMessage(msg: CCMessage): ApiMessage {
   return {
