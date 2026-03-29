@@ -13,7 +13,7 @@ import { parseSession, type ParsedSession } from "./parser.js";
 import { buildRawChain, sliceFromBoundary, stripInternalFields, getCompactionWindows, type CompactionWindow } from "./tree.js";
 import { normalizeMessages } from "./normalize.js";
 import { applyContentReplacements, microcompact } from "./content-replacements.js";
-import { injectUserContext, buildSystemPromptString, type EnvironmentInfo } from "./system-prompt.js";
+import { injectUserContext, buildSystemPromptString, extractToolNames, type SystemPromptOptions } from "./system-prompt.js";
 import type { CCMessage } from "./parser.js";
 
 // ============================================================================
@@ -64,6 +64,8 @@ export interface PipelineOptions {
   injectContext?: boolean;
   /** Skip system prompt building (default: false) */
   skipSystemPrompt?: boolean;
+  /** CC project directory (~/.claude/projects/<hash>/) for memory loading */
+  projectDir?: string | null;
 }
 
 // ============================================================================
@@ -161,13 +163,15 @@ export function processSession(
     messages = injectUserContext(messages, sessionCwd);
   }
 
-  // 8. Build system prompt
+  // 8. Build system prompt (full parity with CC's U2)
+  const toolNames = extractToolNames(messages);
   const systemPrompt = opts.skipSystemPrompt
     ? ""
     : buildSystemPromptString({
         cwd: sessionCwd,
         modelId: modelInfo?.modelId,
-        modelName: modelInfo?.modelId,
+        toolNames,
+        projectDir: opts.projectDir ?? null,
       });
 
   // 9. Convert to API format
