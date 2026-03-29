@@ -151,26 +151,6 @@ Dynamic sections reconstructed from session context:
 
 This matches CC's own resume behavior: rebuild system prompt from current state.
 
-## Parity Verification
-
-Automated extraction pipeline discovers CC's normalize functions by telemetry
-anchor (`tengu_api_before_normalize`), extracts via string search + brace matching
-on prettified source (~4s, no babel needed).
-
-Parity check: 23/23 pass (11 normalize + 12 system prompt).
-
-### Extraction workflow
-```bash
-# Extract + prettify CC source from native binary
-python3 ~/.pi/agent/skills/inspect-claude-source/extract.py --text-only --pretty
-
-# Auto-discover and extract normalize pipeline
-npx tsx scripts/extract-normalize-pipeline.ts
-
-# Compare against duncan-cc implementation
-npx tsx scripts/parity-check.ts
-```
-
 ## Known Gaps
 
 ### MCP Server Instructions

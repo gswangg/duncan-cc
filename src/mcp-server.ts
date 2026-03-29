@@ -255,8 +255,10 @@ async function handleDuncanQuery(args: {
       };
     }
 
-    const withContext = result.results.filter((r) => r.result.hasContext);
-    const relevant = withContext.length > 0 ? withContext : result.results;
+    const errors = result.results.filter((r) => r.result.answer.startsWith("Error: "));
+    const nonErrors = result.results.filter((r) => !r.result.answer.startsWith("Error: "));
+    const withContext = nonErrors.filter((r) => r.result.hasContext);
+    const relevant = withContext.length > 0 ? withContext : nonErrors.length > 0 ? nonErrors : result.results;
 
     const answers = relevant
       .map((r) => {
@@ -269,6 +271,11 @@ async function handleDuncanQuery(args: {
       .join("\n\n---\n\n");
 
     const parts = [`**${args.question}**\n\n${answers}`];
+
+    if (errors.length > 0) {
+      const errorLines = errors.map((r) => `- ${r.sessionId.slice(0, 12)} (window ${r.windowIndex}): ${r.result.answer}`).join("\n");
+      parts.push(`\n\n---\n**${errors.length} error(s):**\n${errorLines}`);
+    }
 
     if (result.hasMore) {
       const nextOffset = (args.offset ?? 0) + (args.limit ?? 10);
