@@ -89,6 +89,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "number",
             description: "For 'self' mode: number of parallel queries for sampling diversity (default: 3).",
           },
+          batchSize: {
+            type: "number",
+            description: "Max concurrent API calls per batch (default: 5).",
+          },
         },
         required: ["question", "mode"],
       },
@@ -156,6 +160,7 @@ async function handleDuncanQuery(args: {
   offset?: number;
   includeSubagents?: boolean;
   copies?: number;
+  batchSize?: number;
 }, toolUseId?: string) {
   try {
     // Self mode: query own active window N times for sampling diversity
@@ -169,6 +174,7 @@ async function handleDuncanQuery(args: {
       const result = await querySelf(args.question, {
         toolUseId,
         copies: args.copies ?? 3,
+        batchSize: args.batchSize,
         apiKey: undefined,
       });
 
@@ -202,6 +208,7 @@ async function handleDuncanQuery(args: {
         toolUseId,
         limit: args.limit ?? 50,
         offset: args.offset ?? 0,
+        batchSize: args.batchSize,
         apiKey: undefined,
       });
 
@@ -245,6 +252,7 @@ async function handleDuncanQuery(args: {
         toolUseId,
         limit: args.limit ?? 50,
         offset: args.offset ?? 0,
+        batchSize: args.batchSize,
         apiKey: undefined,
       });
 
@@ -297,6 +305,7 @@ async function handleDuncanQuery(args: {
       },
       {
         apiKey: undefined,
+        batchSize: args.batchSize,
       },
     );
 
