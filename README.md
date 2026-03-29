@@ -7,9 +7,25 @@ When CC sessions end or get compacted, their conversation history is still on di
 ## Install
 
 ```bash
+npm install -g @gswangg/duncan-cc
+```
+
+Or from source:
+
+```bash
 git clone https://github.com/gswangg/duncan-cc.git
 cd duncan-cc
 npm install
+```
+
+## Configure CC
+
+```bash
+# If installed globally via npm:
+claude mcp add duncan -- npx @gswangg/duncan-cc
+
+# If installed from source:
+claude mcp add duncan -- npx tsx /path/to/duncan-cc/src/mcp-server.ts
 ```
 
 ## Authentication
@@ -19,12 +35,6 @@ Duncan resolves auth automatically:
 1. Explicit apiKey/token parameter
 2. CC OAuth credentials (`~/.claude/.credentials.json`)
 3. `ANTHROPIC_API_KEY` environment variable
-
-## Configure CC
-
-```bash
-claude mcp add duncan -- npx tsx /path/to/duncan-cc/src/mcp-server.ts
-```
 
 ## Tools
 

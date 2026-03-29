@@ -1,5 +1,5 @@
 {
-  "name": "duncan-cc",
+  "name": "@gswangg/duncan-cc",
   "version": "0.1.0",
   "description": "Query dormant Claude Code sessions — the Duncan Idaho approach to agent memory, for CC.",
   "type": "module",
@@ -19,14 +19,14 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",
-    "@modelcontextprotocol/sdk": "^1.12.1"
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "tsx": "^4.21.0"
   },
   "devDependencies": {
     "@babel/generator": "^7.29.1",
     "@babel/parser": "^7.29.2",
     "@babel/traverse": "^7.29.0",
-    "@babel/types": "^7.29.0",
-    "tsx": "^4.21.0"
+    "@babel/types": "^7.29.0"
   },
   "engines": {
     "node": ">=22"
