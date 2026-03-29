@@ -20,7 +20,7 @@ import {
 
 import { processSessionFile, processSessionWindows } from "./pipeline.js";
 import { resolveSessionFiles, resolveSessionFilesExcludingSelf, getProjectsDir, listAllSessionFiles } from "./discovery.js";
-import { querySingleWindow, queryBatch } from "./query.js";
+import { querySingleWindow, queryBatch, querySelf } from "./query.js";
 
 // ============================================================================
 // Server setup
@@ -52,11 +52,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           mode: {
             type: "string",
-            enum: ["project", "global", "session"],
+            enum: ["project", "global", "session", "self"],
             description:
               "Routing mode. 'project': sessions from a specific project dir. " +
               "'global': all sessions across all projects (newest first). " +
-              "'session': a specific session file.",
+              "'session': a specific session file. " +
+              "'self': query own active window N times for sampling diversity.",
           },
           projectDir: {
             type: "string",
@@ -81,6 +82,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           includeSubagents: {
             type: "boolean",
             description: "Include subagent transcripts in search (default: false).",
+          },
+          copies: {
+            type: "number",
+            description: "For 'self' mode: number of parallel queries for sampling diversity (default: 3).",
           },
         },
         required: ["question", "mode"],
@@ -148,8 +153,41 @@ async function handleDuncanQuery(args: {
   limit?: number;
   offset?: number;
   includeSubagents?: boolean;
+  copies?: number;
 }, toolUseId?: string) {
   try {
+    // Self mode: query own active window N times for sampling diversity
+    if (args.mode === "self") {
+      if (!toolUseId) {
+        return {
+          content: [{ type: "text", text: "Self mode requires toolUseId from _meta (only available when called from CC)." }],
+          isError: true,
+        };
+      }
+      const result = await querySelf(args.question, {
+        toolUseId,
+        copies: args.copies ?? 3,
+        apiKey: undefined,
+      });
+
+      if (result.results.length === 0) {
+        return {
+          content: [{ type: "text", text: "Could not find calling session for self-query." }],
+          isError: true,
+        };
+      }
+
+      // Format: show all N answers
+      const answers = result.results.map((r, i) => {
+        return `### Sample ${i + 1}\n${r.result.answer}\n*— ${r.model}*`;
+      }).join("\n\n---\n\n");
+
+      const contextCount = result.results.filter(r => r.result.hasContext).length;
+      return {
+        content: [{ type: "text", text: `**${args.question}** (${result.results.length} samples)\n\n${answers}\n\n*${contextCount}/${result.results.length} had relevant context. queryId: ${result.queryId}*` }],
+      };
+    }
+
     const result = await queryBatch(
       args.question,
       {
@@ -163,7 +201,7 @@ async function handleDuncanQuery(args: {
         toolUseId, // for self-exclusion
       },
       {
-        apiKey: undefined, // resolved automatically from CC/pi OAuth or ANTHROPIC_API_KEY
+        apiKey: undefined,
       },
     );
 

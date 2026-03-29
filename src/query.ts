@@ -11,7 +11,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { processSessionFile, processSessionWindows, type PipelineResult, type WindowPipelineResult } from "./pipeline.js";
-import { resolveSessionFilesExcludingSelf, type RoutingParams, type RoutingResult } from "./discovery.js";
+import { resolveSessionFilesExcludingSelf, findCallingSession, listAllSessionFiles, type RoutingParams, type RoutingResult } from "./discovery.js";
 
 // ============================================================================
 // OAuth token resolution
@@ -336,6 +336,120 @@ export async function queryBatch(
     hasMore: resolved.hasMore,
     offset: routing.offset ?? 0,
   };
+}
+
+// ============================================================================
+// Self Query — multiple samples from the active window
+// ============================================================================
+
+/**
+ * Query the calling session's own active window N times for sampling diversity.
+ *
+ * Uses a two-wave strategy to leverage prompt caching:
+ * 1. Wave 1: Send 1 query to prime the cache (pays full input cost)
+ * 2. Wave 2: Send remaining N-1 queries in batches (hit cached prefix)
+ *
+ * The active session is identified by toolUseId (from MCP _meta).
+ */
+export async function querySelf(
+  question: string,
+  opts: {
+    toolUseId: string;
+    copies?: number;
+    batchSize?: number;
+    apiKey?: string;
+    model?: string;
+    signal?: AbortSignal;
+    onProgress?: (completed: number, total: number) => void;
+  },
+): Promise<DuncanBatchResult> {
+  const queryId = randomUUID();
+  const copies = opts.copies ?? 3;
+
+  // Find the calling session by toolUseId
+  const allSessions = listAllSessionFiles();
+  const callingSessionId = findCallingSession(opts.toolUseId, allSessions);
+  if (!callingSessionId) {
+    return {
+      queryId, question, results: [], totalWindows: 0, hasMore: false, offset: 0,
+    };
+  }
+
+  const session = allSessions.find(s => s.sessionId === callingSessionId);
+  if (!session) {
+    return {
+      queryId, question, results: [], totalWindows: 0, hasMore: false, offset: 0,
+    };
+  }
+
+  // Process the session and get the LAST (active) window
+  const windows = processSessionWindows(session.path);
+  if (windows.length === 0) {
+    return {
+      queryId, question, results: [], totalWindows: 0, hasMore: false, offset: 0,
+    };
+  }
+  const activeWindow = windows[windows.length - 1];
+  if (activeWindow.messages.length === 0) {
+    return {
+      queryId, question, results: [], totalWindows: 0, hasMore: false, offset: 0,
+    };
+  }
+
+  const total = copies;
+  let completed = 0;
+  const results: DuncanQueryResult[] = [];
+
+  const queryOnce = async (): Promise<DuncanQueryResult> => {
+    try {
+      const result = await querySingleWindow(activeWindow, question, {
+        apiKey: opts.apiKey,
+        model: opts.model ?? activeWindow.modelInfo?.modelId,
+        signal: opts.signal,
+      });
+      completed++;
+      opts.onProgress?.(completed, total);
+      return {
+        queryId,
+        sessionFile: session.path,
+        sessionId: session.sessionId,
+        windowIndex: activeWindow.windowIndex,
+        model: activeWindow.modelInfo?.modelId ?? "unknown",
+        result,
+      };
+    } catch (err: any) {
+      completed++;
+      opts.onProgress?.(completed, total);
+      return {
+        queryId,
+        sessionFile: session.path,
+        sessionId: session.sessionId,
+        windowIndex: activeWindow.windowIndex,
+        model: activeWindow.modelInfo?.modelId ?? "unknown",
+        result: { hasContext: false, answer: `Error: ${err.message}` },
+      };
+    }
+  };
+
+  // Wave 1: prime the cache with a single query
+  results.push(await queryOnce());
+  if (opts.signal?.aborted || copies <= 1) {
+    return { queryId, question, results, totalWindows: total, hasMore: false, offset: 0 };
+  }
+
+  // Wave 2: remaining copies in batches, hitting cached prefix
+  const remaining = copies - 1;
+  const batchSize = opts.batchSize ?? 5;
+  for (let i = 0; i < remaining; i += batchSize) {
+    if (opts.signal?.aborted) break;
+    const batchCount = Math.min(batchSize, remaining - i);
+    const batchResults = await Promise.all(
+      Array.from({ length: batchCount }, () => queryOnce()),
+    );
+    results.push(...batchResults);
+  }
+
+  return { queryId, question, results, totalWindows: total, hasMore: false, offset: 0 };
 }
 
 // ============================================================================
