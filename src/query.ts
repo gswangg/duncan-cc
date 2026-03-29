@@ -18,11 +18,10 @@ import { resolveSessionFilesExcludingSelf, type RoutingParams, type RoutingResul
 // ============================================================================
 
 /**
- * Resolve Anthropic API key from:
- * 1. Explicit apiKey parameter
- * 2. ANTHROPIC_API_KEY env var
- * 3. CC's OAuth credentials (~/.claude/.credentials.json) → exchange for API key
- * 4. Pi's OAuth credentials (~/.pi/agent/auth.json) → exchange for API key
+ * Resolve Anthropic auth from:
+ * 1. Explicit apiKey/token parameter
+ * 2. CC's OAuth credentials (~/.claude/.credentials.json)
+ * 3. ANTHROPIC_API_KEY env var
  */
 
 
@@ -35,15 +34,13 @@ interface ResolvedAuth {
 
 function resolveAuth(explicit?: string): ResolvedAuth {
   if (explicit) {
-    // If explicit key looks like OAuth token, use authToken
     if (explicit.includes("sk-ant-oat")) {
       return oauthClientConfig(explicit);
     }
     return { apiKey: explicit };
   }
-  if (process.env.ANTHROPIC_API_KEY) return { apiKey: process.env.ANTHROPIC_API_KEY };
 
-  // CC's OAuth
+  // CC's OAuth — primary auth for CC users
   const ccCredsPath = join(homedir(), ".claude", ".credentials.json");
   if (existsSync(ccCredsPath)) {
     try {
@@ -54,18 +51,10 @@ function resolveAuth(explicit?: string): ResolvedAuth {
     } catch {}
   }
 
-  // Pi's OAuth
-  const piAuthPath = join(homedir(), ".pi", "agent", "auth.json");
-  if (existsSync(piAuthPath)) {
-    try {
-      const auth = JSON.parse(readFileSync(piAuthPath, "utf-8"));
-      if (auth.anthropic?.access) {
-        return oauthClientConfig(auth.anthropic.access);
-      }
-    } catch {}
-  }
+  // Fallback: API key from environment
+  if (process.env.ANTHROPIC_API_KEY) return { apiKey: process.env.ANTHROPIC_API_KEY };
 
-  throw new Error("No Anthropic auth found. Set ANTHROPIC_API_KEY or authenticate via Claude Code or pi.");
+  throw new Error("No Anthropic auth found. Authenticate via Claude Code or set ANTHROPIC_API_KEY.");
 }
 
 function oauthClientConfig(token: string): ResolvedAuth {
