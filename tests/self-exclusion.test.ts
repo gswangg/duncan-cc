@@ -4,7 +4,7 @@
  */
 
 import { join } from "node:path";
-import { mkdirSync, writeFileSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, statSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import {
   findCallingSession,
@@ -179,22 +179,26 @@ console.log("\n--- findCallingSession: multiple sessions, correct one identified
 // Tests: findCallingSession on real test data
 // ============================================================================
 
-console.log("\n--- findCallingSession: real session data ---");
-{
-  const codexDir = join(TESTDATA, "-Users-wednesdayniemeyer-Documents-gniemeyer-Projects-codex");
-  const sessions = listSessionFiles(codexDir);
-  assert(sessions.length > 0, `have codex sessions: ${sessions.length}`);
+if (existsSync(TESTDATA)) {
+  console.log("\n--- findCallingSession: real session data ---");
+  {
+    const codexDir = join(TESTDATA, "-Users-wednesdayniemeyer-Documents-gniemeyer-Projects-codex");
+    const sessions = listSessionFiles(codexDir);
+    assert(sessions.length > 0, `have codex sessions: ${sessions.length}`);
 
-  // Pick a real tool_use ID from the test data
-  const targetId = "toolu_01ApH1X3AiGqZw7C9QjUXeGp";
-  const sourceDir = join(TESTDATA, "-Users-wednesdayniemeyer--claude-skills-inspect-claude-source");
-  const sourceSessions = listSessionFiles(sourceDir);
+    // Pick a real tool_use ID from the test data
+    const targetId = "toolu_01ApH1X3AiGqZw7C9QjUXeGp";
+    const sourceDir = join(TESTDATA, "-Users-wednesdayniemeyer--claude-skills-inspect-claude-source");
+    const sourceSessions = listSessionFiles(sourceDir);
 
-  // Search all test sessions — should find it in the inspect-claude-source project
-  const allCandidates = [...sessions, ...sourceSessions];
-  const result = findCallingSession(targetId, allCandidates);
-  assert(result === "28e532ae-cb50-4f6f-9f08-914cbf6563b7", `found real session: ${result}`);
-  ok("finds toolUseId in real CC session data");
+    // Search all test sessions — should find it in the inspect-claude-source project
+    const allCandidates = [...sessions, ...sourceSessions];
+    const result = findCallingSession(targetId, allCandidates);
+    assert(result === "28e532ae-cb50-4f6f-9f08-914cbf6563b7", `found real session: ${result}`);
+    ok("finds toolUseId in real CC session data");
+  }
+} else {
+  console.log("\n--- findCallingSession: real session data (skipped, no corpus) ---");
 }
 
 // ============================================================================

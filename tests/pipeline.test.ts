@@ -6,8 +6,9 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join, basename } from "node:path";
 import { processSessionFile, processSessionWindows, toApiMessages } from "../src/pipeline.js";
+import { requireCorpus } from "./_skip-if-no-corpus.js";
 
-const TESTDATA = join(import.meta.dirname, "..", "testdata", "projects");
+const TESTDATA = requireCorpus();
 
 function findSessionFiles(): string[] {
   const files: string[] = [];

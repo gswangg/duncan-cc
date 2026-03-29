@@ -4,8 +4,9 @@
 
 import { join, basename } from "node:path";
 import { listSessionFiles, listSubagentFiles, listAllSessionFiles, resolveSessionFiles } from "../src/discovery.js";
+import { requireCorpus } from "./_skip-if-no-corpus.js";
 
-const TESTDATA = join(import.meta.dirname, "..", "testdata", "projects");
+const TESTDATA = requireCorpus();
 
 let passed = 0;
 let failed = 0;

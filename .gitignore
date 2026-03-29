@@ -1,2 +1,11 @@
-node_modules\ndist\n.astro
 node_modules
+dist
+
+# Test corpus — private session data, not committed
+testdata/
+
+# Extracted CC source — regenerable via extraction pipeline
+scripts/extracted/
+
+# System prompt extractions — regenerable
+scripts/extracted/_sysprompt_*

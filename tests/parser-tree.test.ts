@@ -7,8 +7,9 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 import { parseSession, parseJsonl, isTranscriptMessage, isCompactBoundary, isLocalCommand } from "../src/parser.js";
 import { findLeaves, findBestLeaf, walkChain, stripInternalFields, sliceFromBoundary, getCompactionWindows, buildRawChain } from "../src/tree.js";
+import { requireCorpus } from "./_skip-if-no-corpus.js";
 
-const TESTDATA = join(import.meta.dirname, "..", "testdata", "projects");
+const TESTDATA = requireCorpus();
 
 // Find all main session files (not subagent)
 function findSessionFiles(): string[] {

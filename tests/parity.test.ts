@@ -10,8 +10,9 @@ import { normalizeMessages } from "../src/normalize.js";
 import { applyContentReplacements } from "../src/content-replacements.js";
 import { processSessionFile } from "../src/pipeline.js";
 import { listSubagentFiles } from "../src/discovery.js";
+import { requireCorpus } from "./_skip-if-no-corpus.js";
 
-const TESTDATA = join(import.meta.dirname, "..", "testdata", "projects");
+const TESTDATA = requireCorpus();
 
 let passed = 0, failed = 0;
 function assert(c: boolean, m: string) { if (c) passed++; else { failed++; console.error(`  ✗ ${m}`); } }

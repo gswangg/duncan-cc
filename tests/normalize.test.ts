@@ -8,8 +8,9 @@ import { join, basename } from "node:path";
 import { parseSession } from "../src/parser.js";
 import { buildRawChain } from "../src/tree.js";
 import { normalizeMessages } from "../src/normalize.js";
+import { requireCorpus } from "./_skip-if-no-corpus.js";
 
-const TESTDATA = join(import.meta.dirname, "..", "testdata", "projects");
+const TESTDATA = requireCorpus();
 
 function findSessionFiles(): string[] {
   const files: string[] = [];
