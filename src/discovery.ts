@@ -12,6 +12,7 @@
 import { readdirSync, statSync, existsSync, openSync, readSync, closeSync, readFileSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { homedir } from "node:os";
+import { execSync } from "node:child_process";
 
 // ============================================================================
 // Path resolution — mirrors CC's path layout
@@ -512,14 +513,12 @@ export function resolveSessionFiles(params: RoutingParams): RoutingResult {
       const projectSessions = listSessionFiles(projectDir);
       let targetBranch: string | null = null;
 
-      // If we have a toolUseId, find the calling session's branch
-      if (params.toolUseId) {
-        const callingId = findCallingSession(params.toolUseId, projectSessions);
-        if (callingId) {
-          const callingSession = projectSessions.find(s => s.sessionId === callingId);
-          if (callingSession) {
-            targetBranch = extractGitBranch(callingSession.path);
-          }
+      // Resolve calling session's branch via PID-based lookup
+      const callingId = resolveCallingSessionId();
+      if (callingId) {
+        const callingSession = projectSessions.find(s => s.sessionId === callingId);
+        if (callingSession) {
+          targetBranch = extractGitBranch(callingSession.path);
         }
       }
 
@@ -552,7 +551,58 @@ export function resolveSessionFiles(params: RoutingParams): RoutingResult {
 }
 
 // ============================================================================
-// Self-exclusion — find the calling session by toolUseId
+// Calling session resolution — deterministic PID-based + toolUseId fallback
+// ============================================================================
+
+/**
+ * Resolve the calling session via CC's own session registry.
+ *
+ * CC writes ~/.claude/sessions/<pid>.json for each active session.
+ * The MCP server is a child (possibly grandchild) of the CC process.
+ * We walk up the process tree from our PID until we find one that
+ * matches a session file, then read the sessionId from it.
+ *
+ * This is fully deterministic — no file scanning or timing dependencies.
+ */
+export function resolveCallingSessionByPid(): { sessionId: string; cwd: string } | null {
+  const sessionsDir = join(homedir(), ".claude", "sessions");
+  if (!existsSync(sessionsDir)) return null;
+
+  // Walk up process tree until we hit init (pid 1) or find a match
+  let pid = process.pid;
+  while (pid > 1) {
+    const sessionFile = join(sessionsDir, `${pid}.json`);
+    if (existsSync(sessionFile)) {
+      try {
+        const info = JSON.parse(readFileSync(sessionFile, "utf-8"));
+        if (info.sessionId) {
+          return { sessionId: info.sessionId, cwd: info.cwd ?? process.cwd() };
+        }
+      } catch {}
+    }
+    const ppid = getParentPid(pid);
+    if (!ppid || ppid === pid) break;
+    pid = ppid;
+  }
+  return null;
+}
+
+/** Get parent PID for a given PID. */
+function getParentPid(pid: number): number | null {
+  try {
+    // process.ppid only works for our own process
+    if (pid === process.pid) return process.ppid;
+    // For other processes, use ps
+    const result = execSync(`ps -o ppid= -p ${pid}`, { encoding: "utf-8", timeout: 1000 }).trim();
+    const ppid = parseInt(result, 10);
+    return Number.isFinite(ppid) ? ppid : null;
+  } catch {
+    return null;
+  }
+}
+
+// ============================================================================
+// Fallback: find calling session by toolUseId tail-scan
 // ============================================================================
 
 /** Size of tail chunk to scan for toolUseId (bytes). */
@@ -618,4 +668,18 @@ export function findCallingSession(
   return null;
 }
 
-
+/**
+ * Resolve the calling session via PID-based lookup.
+ * Reads CC's session registry — no file scanning, no race conditions.
+ * Throws if the session cannot be identified.
+ */
+export function resolveCallingSessionId(): string {
+  const pidResult = resolveCallingSessionByPid();
+  if (!pidResult) {
+    throw new Error(
+      "Cannot identify calling session. No ~/.claude/sessions/<pid>.json found " +
+      "for any ancestor process. Is this running as a CC MCP server?"
+    );
+  }
+  return pidResult.sessionId;
+}

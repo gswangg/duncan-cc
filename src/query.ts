@@ -12,7 +12,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { homedir, platform, userInfo } from "node:os";
 import { processSessionFile, processSessionWindows, type PipelineResult, type WindowPipelineResult } from "./pipeline.js";
-import { resolveSessionFiles, findCallingSession, listAllSessionFiles, listSubagentFiles, type RoutingParams, type RoutingResult } from "./discovery.js";
+import { resolveSessionFiles, resolveCallingSessionId, listAllSessionFiles, listSubagentFiles, type RoutingParams, type RoutingResult } from "./discovery.js";
 import { recordQuery, buildLogRecord } from "./query-logger.js";
 
 // ============================================================================
@@ -253,7 +253,7 @@ export async function querySingleWindow(
     messages: fixedMessages,
     tools: [DUNCAN_RESPONSE_TOOL],
     tool_choice: { type: "tool" as const, name: "duncan_response" },
-    max_tokens: 65536,
+    max_tokens: 64000,
   });
   const response = await stream.finalMessage();
 
@@ -287,7 +287,7 @@ export async function querySingleWindow(
         messages: retryMessages,
         tools: [DUNCAN_RESPONSE_TOOL],
         tool_choice: { type: "tool" as const, name: "duncan_response" },
-        max_tokens: 65536,
+        max_tokens: 64000,
       });
       const retryResponse = await retryStream.finalMessage();
       const retryCall = retryResponse.content.find(
@@ -383,9 +383,7 @@ export async function queryBatch(
   // Find the calling session for self-exclusion (window-level, not session-level).
   // For the calling session: keep compaction windows, drop only the active (last) window.
   // For all other sessions: include all windows.
-  const callingSessionId = routing.toolUseId
-    ? findCallingSession(routing.toolUseId, resolved.sessions)
-    : null;
+  const callingSessionId = resolveCallingSessionId();
 
   // Process each session into windows
   const targets: Array<{
@@ -514,9 +512,9 @@ export async function querySelf(
   const queryId = randomUUID();
   const copies = opts.copies ?? 3;
 
-  // Find the calling session by toolUseId
+  // Find the calling session via CC's session registry (deterministic, no race)
   const allSessions = listAllSessionFiles();
-  const callingSessionId = findCallingSession(opts.toolUseId, allSessions);
+  const callingSessionId = resolveCallingSessionId();
   if (!callingSessionId) {
     return {
       queryId, question, results: [], totalWindows: 0, hasMore: false, offset: 0, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
@@ -634,9 +632,9 @@ export async function queryAncestors(
   const limit = opts.limit ?? 50;
   const offset = opts.offset ?? 0;
 
-  // Find the calling session
+  // Find the calling session via CC's session registry
   const allSessions = listAllSessionFiles();
-  const callingSessionId = findCallingSession(opts.toolUseId, allSessions);
+  const callingSessionId = resolveCallingSessionId();
   if (!callingSessionId) {
     return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };
   }
@@ -739,12 +737,13 @@ export async function querySubagents(
   const limit = opts.limit ?? 50;
   const offset = opts.offset ?? 0;
 
-  const allSessions = listAllSessionFiles();
-  const callingSessionId = findCallingSession(opts.toolUseId, allSessions);
+  // Find the calling session via CC's session registry
+  const callingSessionId = resolveCallingSessionId();
   if (!callingSessionId) {
     return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };
   }
 
+  const allSessions = listAllSessionFiles();
   const session = allSessions.find(s => s.sessionId === callingSessionId);
   if (!session) {
     return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };
