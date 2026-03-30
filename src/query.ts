@@ -8,8 +8,9 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, platform, userInfo } from "node:os";
 import { processSessionFile, processSessionWindows, type PipelineResult, type WindowPipelineResult } from "./pipeline.js";
 import { resolveSessionFiles, findCallingSession, listAllSessionFiles, listSubagentFiles, type RoutingParams, type RoutingResult } from "./discovery.js";
 import { recordQuery, buildLogRecord } from "./query-logger.js";
@@ -33,6 +34,25 @@ interface ResolvedAuth {
   defaultHeaders?: Record<string, string>;
 }
 
+/**
+ * Read an OAuth token from the macOS keychain.
+ * CC stores credentials under service name with account = $USER.
+ * Returns null if not on macOS or keychain read fails.
+ */
+function readFromKeychain(service: string): string | null {
+  if (platform() !== "darwin") return null;
+  try {
+    const account = process.env.USER || userInfo().username;
+    const result = execFileSync("security", [
+      "find-generic-password", "-a", account, "-w", "-s", service,
+    ], { encoding: "utf-8", timeout: 5000 });
+    const token = result.trim();
+    return token || null;
+  } catch {
+    return null;
+  }
+}
+
 function resolveAuth(explicit?: string): ResolvedAuth {
   if (explicit) {
     if (explicit.includes("sk-ant-oat")) {
@@ -41,7 +61,7 @@ function resolveAuth(explicit?: string): ResolvedAuth {
     return { apiKey: explicit };
   }
 
-  // CC's OAuth — primary auth for CC users
+  // CC's OAuth from credentials file — primary auth for CC users
   const ccCredsPath = join(homedir(), ".claude", ".credentials.json");
   if (existsSync(ccCredsPath)) {
     try {
@@ -50,6 +70,23 @@ function resolveAuth(explicit?: string): ResolvedAuth {
         return oauthClientConfig(creds.claudeAiOauth.accessToken);
       }
     } catch {}
+  }
+
+  // macOS keychain — CC may store OAuth tokens here instead of / in addition to the file
+  const keychainToken = readFromKeychain("Claude Code-credentials");
+  if (keychainToken) {
+    // Keychain may store the full JSON or just the token
+    try {
+      const parsed = JSON.parse(keychainToken);
+      if (parsed.claudeAiOauth?.accessToken) {
+        return oauthClientConfig(parsed.claudeAiOauth.accessToken);
+      }
+    } catch {
+      // Not JSON — treat as raw token
+      if (keychainToken.startsWith("sk-ant-")) {
+        return oauthClientConfig(keychainToken);
+      }
+    }
   }
 
   // Fallback: API key from environment
@@ -66,7 +103,7 @@ function oauthClientConfig(token: string): ResolvedAuth {
       "accept": "application/json",
       "anthropic-dangerous-direct-browser-access": "true",
       "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
-      "user-agent": "duncan-cc/0.3.0",
+      "user-agent": "duncan-cc/0.4.0",
       "x-app": "cli",
     },
   };
@@ -125,6 +162,13 @@ export interface DuncanQueryResult {
   result: DuncanResult;
 }
 
+export interface DuncanUsageStats {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+}
+
 export interface DuncanBatchResult {
   queryId: string;
   question: string;
@@ -132,6 +176,8 @@ export interface DuncanBatchResult {
   totalWindows: number;
   hasMore: boolean;
   offset: number;
+  /** Aggregated token usage across all queries in this batch */
+  usage: DuncanUsageStats;
 }
 
 // ============================================================================
@@ -207,7 +253,7 @@ export async function querySingleWindow(
     messages: fixedMessages,
     tools: [DUNCAN_RESPONSE_TOOL],
     tool_choice: { type: "tool" as const, name: "duncan_response" },
-    max_tokens: 16384,
+    max_tokens: 65536,
   });
   const response = await stream.finalMessage();
 
@@ -217,15 +263,40 @@ export async function querySingleWindow(
   );
 
   if (toolCall) {
-    const input = toolCall.input as { hasContext: boolean; answer: string };
-    if (typeof input.hasContext === "boolean" && typeof input.answer === "string") {
+    const input = toolCall.input as Record<string, unknown>;
+    const parsed = coerceDuncanResponse(input);
+    if (parsed) {
       const latencyMs = Date.now() - startTime;
-      return {
-        hasContext: input.hasContext,
-        answer: input.answer,
-        usage: response.usage as any,
-        latencyMs,
-      };
+      return { ...parsed, usage: response.usage as any, latencyMs };
+    }
+
+    // Malformed input — retry once with correction prompt
+    const retryMessages = [
+      ...fixedMessages,
+      { role: "assistant" as const, content: response.content },
+      {
+        role: "user" as const,
+        content: "Your duncan_response tool call had invalid input. Call it again with { hasContext: boolean, answer: string }.",
+      },
+    ];
+    const retryStream = client.messages.stream({
+      model,
+      system: systemBlocks.length > 0 ? systemBlocks : undefined,
+      messages: retryMessages,
+      tools: [DUNCAN_RESPONSE_TOOL],
+      tool_choice: { type: "tool" as const, name: "duncan_response" },
+      max_tokens: 65536,
+    });
+    const retryResponse = await retryStream.finalMessage();
+    const retryCall = retryResponse.content.find(
+      (c): c is Anthropic.ToolUseBlock => c.type === "tool_use" && c.name === "duncan_response",
+    );
+    if (retryCall) {
+      const retryParsed = coerceDuncanResponse(retryCall.input as Record<string, unknown>);
+      if (retryParsed) {
+        const latencyMs = Date.now() - startTime;
+        return { ...retryParsed, usage: retryResponse.usage as any, latencyMs };
+      }
     }
   }
 
@@ -394,6 +465,7 @@ export async function queryBatch(
     totalWindows: targets.length,
     hasMore: resolved.hasMore,
     offset: routing.offset ?? 0,
+    usage: aggregateUsage(results),
   };
   logBatchResults(batchResult, routing.mode, callingSessionId);
   return batchResult;
@@ -432,14 +504,14 @@ export async function querySelf(
   const callingSessionId = findCallingSession(opts.toolUseId, allSessions);
   if (!callingSessionId) {
     return {
-      queryId, question, results: [], totalWindows: 0, hasMore: false, offset: 0,
+      queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }: 0, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
     };
   }
 
   const session = allSessions.find(s => s.sessionId === callingSessionId);
   if (!session) {
     return {
-      queryId, question, results: [], totalWindows: 0, hasMore: false, offset: 0,
+      queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }: 0, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
     };
   }
 
@@ -447,13 +519,13 @@ export async function querySelf(
   const windows = processSessionWindows(session.path);
   if (windows.length === 0) {
     return {
-      queryId, question, results: [], totalWindows: 0, hasMore: false, offset: 0,
+      queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }: 0, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
     };
   }
   const activeWindow = windows[windows.length - 1];
   if (activeWindow.messages.length === 0) {
     return {
-      queryId, question, results: [], totalWindows: 0, hasMore: false, offset: 0,
+      queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }: 0, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
     };
   }
 
@@ -497,7 +569,7 @@ export async function querySelf(
   // Wave 1: prime the cache with a single query
   results.push(await queryOnce());
   if (opts.signal?.aborted || copies <= 1) {
-    const batchResult: DuncanBatchResult = { queryId, question, results, totalWindows: total, hasMore: false, offset: 0 };
+    const batchResult: DuncanBatchResult = { queryId, question, results, totalWindows: total, hasMore: false, offset: 0, usage: aggregateUsage(results) };
     logBatchResults(batchResult, "self", callingSessionId);
     return batchResult;
   }
@@ -514,7 +586,7 @@ export async function querySelf(
     results.push(...batchResults);
   }
 
-  const batchResult: DuncanBatchResult = { queryId, question, results, totalWindows: total, hasMore: false, offset: 0 };
+  const batchResult: DuncanBatchResult = { queryId, question, results, totalWindows: total, hasMore: false, offset: 0, usage: aggregateUsage(results) };
   logBatchResults(batchResult, "self", callingSessionId);
   return batchResult;
 }
@@ -551,12 +623,12 @@ export async function queryAncestors(
   const allSessions = listAllSessionFiles();
   const callingSessionId = findCallingSession(opts.toolUseId, allSessions);
   if (!callingSessionId) {
-    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset };
+    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };
   }
 
   const session = allSessions.find(s => s.sessionId === callingSessionId);
   if (!session) {
-    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset };
+    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };
   }
 
   // Get all windows, drop the last (active) one
@@ -564,7 +636,7 @@ export async function queryAncestors(
   const ancestorWindows = allWindows.slice(0, -1).filter(w => w.messages.length > 0);
 
   if (ancestorWindows.length === 0) {
-    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset };
+    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };
   }
 
   const totalWindows = ancestorWindows.length;
@@ -622,6 +694,7 @@ export async function queryAncestors(
     totalWindows,
     hasMore: offset + limit < totalWindows,
     offset,
+    usage: aggregateUsage(results),
   };
   logBatchResults(batchResult, "ancestors", callingSessionId);
   return batchResult;
@@ -654,17 +727,17 @@ export async function querySubagents(
   const allSessions = listAllSessionFiles();
   const callingSessionId = findCallingSession(opts.toolUseId, allSessions);
   if (!callingSessionId) {
-    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset };
+    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };
   }
 
   const session = allSessions.find(s => s.sessionId === callingSessionId);
   if (!session) {
-    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset };
+    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };
   }
 
   const subagentFiles = listSubagentFiles(session.path);
   if (subagentFiles.length === 0) {
-    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset };
+    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };
   }
 
   // Expand subagent files to windows, passing agent type for prompt dispatch
@@ -680,7 +753,7 @@ export async function querySubagents(
   }
 
   if (allTargets.length === 0) {
-    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset };
+    return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };
   }
 
   const totalWindows = allTargets.length;
@@ -728,6 +801,7 @@ export async function querySubagents(
   const batchResult: DuncanBatchResult = {
     queryId, question, results, totalWindows,
     hasMore: offset + limit < totalWindows, offset,
+    usage: aggregateUsage(results),
   };
   logBatchResults(batchResult, "subagents", callingSessionId);
   return batchResult;
@@ -747,6 +821,47 @@ export async function querySubagents(
  * Matches CC's caching strategy (CC API format functions) where the last content block
  * of each message gets cache_control when caching is enabled.
  */
+/**
+ * Coerce a duncan_response tool input to the expected shape.
+ * Handles common model quirks: hasContext as string, missing fields.
+ */
+/** Aggregate usage stats from all results in a batch. */
+function aggregateUsage(results: DuncanQueryResult[]): DuncanUsageStats {
+  const stats: DuncanUsageStats = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+  };
+  for (const r of results) {
+    if (r.result.usage) {
+      stats.inputTokens += r.result.usage.input_tokens ?? 0;
+      stats.outputTokens += r.result.usage.output_tokens ?? 0;
+      stats.cacheCreationInputTokens += r.result.usage.cache_creation_input_tokens ?? 0;
+      stats.cacheReadInputTokens += r.result.usage.cache_read_input_tokens ?? 0;
+    }
+  }
+  return stats;
+}
+
+function coerceDuncanResponse(input: Record<string, unknown>): { hasContext: boolean; answer: string } | null {
+  if (!input || typeof input !== "object") return null;
+
+  let hasContext: boolean;
+  if (typeof input.hasContext === "boolean") {
+    hasContext = input.hasContext;
+  } else if (typeof input.hasContext === "string") {
+    hasContext = input.hasContext === "true";
+  } else {
+    return null;
+  }
+
+  const answer = typeof input.answer === "string" ? input.answer : null;
+  if (answer === null) return null;
+
+  return { hasContext, answer };
+}
+
 function addCacheBreakpoints(messages: Anthropic.MessageParam[]): void {
   if (messages.length < 2) return;
 

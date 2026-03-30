@@ -34,9 +34,10 @@ Duncan resolves auth automatically in this order:
 
 1. **Explicit** apiKey/token parameter (if passed)
 2. **CC OAuth** credentials from `~/.claude/.credentials.json` (primary for CC users)
-3. **API key** from `ANTHROPIC_API_KEY` environment variable
+3. **macOS keychain** — `security find-generic-password` for CC's stored OAuth token (macOS only)
+4. **API key** from `ANTHROPIC_API_KEY` environment variable
 
-Most CC users authenticate via OAuth — duncan picks this up automatically with no configuration.
+On macOS, duncan also checks the system keychain (`security find-generic-password`) for CC's OAuth credentials, since CC may store tokens there instead of the plaintext file. Most CC users authenticate via OAuth — duncan picks this up automatically with no configuration.
 
 ## Tools
 
@@ -86,7 +87,8 @@ List available sessions with previews. Returns session IDs, timestamps, sizes, g
 | `projectPath` | string | | — | Original working directory (resolved to project dir via CC's hashing) |
 | `cwd` | string | | process.cwd() | Working directory |
 | `limit` | number | | 20 | Max sessions to list |
-| `previews` | boolean | | true | Include first/last user message previews |
+| `previews` | boolean | | true | Include message previews |
+| `previewLines` | number | | 2 | Messages to show from head and tail of each session |
 
 ## Routing Modes
 

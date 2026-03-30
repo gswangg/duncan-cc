@@ -28,7 +28,7 @@ import { querySingleWindow, queryBatch, querySelf, queryAncestors, querySubagent
 // ============================================================================
 
 const server = new Server(
-  { name: "duncan-cc", version: "0.3.0" },
+  { name: "duncan-cc", version: "0.4.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -157,7 +157,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           previews: {
             type: "boolean",
-            description: "Include first/last user message previews (default: true).",
+            description: "Include message previews (default: true).",
+          },
+          previewLines: {
+            type: "number",
+            description: "Number of messages to show from head and tail of each session (default: 2).",
           },
         },
         required: ["mode"],
@@ -192,6 +196,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
   }
 });
+
+/**
+ * Format token usage stats for display.
+ */
+function formatTokenStats(usage: { inputTokens: number; outputTokens: number; cacheCreationInputTokens: number; cacheReadInputTokens: number }): string {
+  const fmt = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
+  const parts = [`${fmt(usage.inputTokens)} in`, `${fmt(usage.outputTokens)} out`];
+  if (usage.cacheReadInputTokens > 0) parts.push(`${fmt(usage.cacheReadInputTokens)} cache-read`);
+  if (usage.cacheCreationInputTokens > 0) parts.push(`${fmt(usage.cacheCreationInputTokens)} cache-write`);
+  return `Tokens: ${parts.join(", ")}`;
+}
 
 /**
  * Send an MCP progress notification if a progressToken was provided.
@@ -252,7 +267,7 @@ async function handleDuncanQuery(args: {
 
       const contextCount = result.results.filter(r => r.result.hasContext).length;
       return {
-        content: [{ type: "text", text: `**${args.question}** (${result.results.length} samples)\n\n${answers}\n\n*${contextCount}/${result.results.length} had relevant context. queryId: ${result.queryId}*` }],
+        content: [{ type: "text", text: `**${args.question}** (${result.results.length} samples)\n\n${answers}\n\n*${contextCount}/${result.results.length} had relevant context. ${formatTokenStats(result.usage)}. queryId: ${result.queryId}*` }],
       };
     }
 
@@ -296,7 +311,7 @@ async function handleDuncanQuery(args: {
       }
 
       const contextCount = withContext.length;
-      parts.push(`\n\n*${contextCount}/${result.results.length} windows had relevant context. queryId: ${result.queryId}*`);
+      parts.push(`\n\n*${contextCount}/${result.results.length} windows had relevant context. ${formatTokenStats(result.usage)}. queryId: ${result.queryId}*`);
 
       return { content: [{ type: "text", text: parts.join("") }] };
     }
@@ -348,7 +363,7 @@ async function handleDuncanQuery(args: {
       }
 
       const contextCount = withContext.length;
-      parts.push(`\n\n*${contextCount}/${result.results.length} subagent windows had relevant context. queryId: ${result.queryId}*`);
+      parts.push(`\n\n*${contextCount}/${result.results.length} subagent windows had relevant context. ${formatTokenStats(result.usage)}. queryId: ${result.queryId}*`);
 
       return { content: [{ type: "text", text: parts.join("") }] };
     }
@@ -411,7 +426,7 @@ async function handleDuncanQuery(args: {
 
     const contextCount = withContext.length;
     const totalCount = result.results.length;
-    parts.push(`\n\n*${contextCount}/${totalCount} sessions had relevant context. queryId: ${result.queryId}*`);
+    parts.push(`\n\n*${contextCount}/${totalCount} sessions had relevant context. ${formatTokenStats(result.usage)}. queryId: ${result.queryId}*`);
 
     return {
       content: [{ type: "text", text: parts.join("") }],
@@ -462,6 +477,7 @@ async function handleListSessions(args: {
   cwd?: string;
   limit?: number;
   previews?: boolean;
+  previewLines?: number;
 }) {
   try {
     // Resolve projectDir from projectPath if provided
@@ -482,6 +498,7 @@ async function handleListSessions(args: {
     }
 
     const showPreviews = args.previews !== false;
+    const previewLines = args.previewLines ?? 2;
 
     const lines = resolved.sessions.map((s) => {
       const date = s.mtime.toISOString().slice(0, 16);
@@ -492,16 +509,26 @@ async function handleListSessions(args: {
       let line = `**${s.sessionId.slice(0, 12)}**  ${date}  ${size}`;
 
       if (showPreviews) {
-        const preview = extractSessionPreview(s.path);
+        const preview = extractSessionPreview(s.path, previewLines);
         if (preview.gitBranch) line += `  branch: ${preview.gitBranch}`;
         if (preview.cwd) line += `\n  cwd: ${preview.cwd}`;
-        if (preview.firstUserMessage) {
-          const truncated = preview.firstUserMessage.replace(/\n/g, " ").slice(0, 120);
-          line += `\n  ▶ ${truncated}${preview.firstUserMessage.length > 120 ? "…" : ""}`;
+
+        const roleIcon = (role: string) => role === "assistant" ? "◇" : "▸";
+        const formatMsg = (m: { role: string; text: string }) => {
+          const truncated = m.text.replace(/\n/g, " ").slice(0, 120);
+          return `${roleIcon(m.role)} ${truncated}${m.text.length > 120 ? "…" : ""}`;
+        };
+
+        if (preview.headMessages.length > 0) {
+          for (const m of preview.headMessages) {
+            line += `\n  ${formatMsg(m)}`;
+          }
         }
-        if (preview.lastUserMessage && preview.lastUserMessage !== preview.firstUserMessage) {
-          const truncated = preview.lastUserMessage.replace(/\n/g, " ").slice(0, 120);
-          line += `\n  ◀ ${truncated}${preview.lastUserMessage.length > 120 ? "…" : ""}`;
+        if (preview.tailMessages.length > 0) {
+          line += `\n  ...`;
+          for (const m of preview.tailMessages) {
+            line += `\n  ${formatMsg(m)}`;
+          }
         }
       }
 

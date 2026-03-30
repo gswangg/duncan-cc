@@ -135,7 +135,8 @@ it can be passed explicitly via the `gitBranch` parameter.
 Resolution order:
 1. Explicit apiKey/token parameter
 2. CC OAuth credentials (`~/.claude/.credentials.json`)
-3. `ANTHROPIC_API_KEY` environment variable
+3. macOS keychain (`security find-generic-password` — macOS only)
+4. `ANTHROPIC_API_KEY` environment variable
 
 ## Prompt Caching
 

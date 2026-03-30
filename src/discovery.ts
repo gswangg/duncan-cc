@@ -185,25 +185,44 @@ export function listSubagentFiles(sessionFile: string): SessionFileInfo[] {
 /** Size of chunks to scan for preview data (bytes). */
 const PREVIEW_SCAN_BYTES = 16_384;
 
+export interface PreviewMessage {
+  role: "user" | "assistant";
+  text: string;
+}
+
 export interface SessionPreview {
-  /** First user message text (truncated) */
-  firstUserMessage: string | null;
-  /** Last user message text (truncated) */
-  lastUserMessage: string | null;
+  /** First N messages from the session */
+  headMessages: PreviewMessage[];
+  /** Last N messages from the session */
+  tailMessages: PreviewMessage[];
   /** Git branch */
   gitBranch: string | null;
   /** Working directory from session */
   cwd: string | null;
 }
 
+/** Extract text from a JSONL entry's message content. */
+function extractMessageText(entry: any): string | null {
+  if (!entry.message?.content) return null;
+  const content = entry.message.content;
+  const text = typeof content === "string"
+    ? content
+    : (Array.isArray(content)
+        ? content.find((b: any) => b.type === "text")?.text
+        : null) ?? "";
+  return text || null;
+}
+
 /**
  * Extract preview information from a session file by scanning head and tail.
  * Avoids full parsing — reads only the first and last PREVIEW_SCAN_BYTES.
+ * 
+ * @param previewLines Number of messages to extract from head and tail (default: 2)
  */
-export function extractSessionPreview(filePath: string): SessionPreview {
+export function extractSessionPreview(filePath: string, previewLines: number = 2): SessionPreview {
   const preview: SessionPreview = {
-    firstUserMessage: null,
-    lastUserMessage: null,
+    headMessages: [],
+    tailMessages: [],
     gitBranch: null,
     cwd: null,
   };
@@ -213,7 +232,7 @@ export function extractSessionPreview(filePath: string): SessionPreview {
     const size = stat.size;
     if (size === 0) return preview;
 
-    // Scan head for first user message, gitBranch, cwd
+    // Scan head for first messages, gitBranch, cwd
     const headSize = Math.min(size, PREVIEW_SCAN_BYTES);
     const headBuf = Buffer.alloc(headSize);
     const fd = openSync(filePath, "r");
@@ -232,19 +251,20 @@ export function extractSessionPreview(filePath: string): SessionPreview {
         if (!preview.cwd && entry.cwd) {
           preview.cwd = entry.cwd;
         }
-        if (!preview.firstUserMessage && entry.type === "user" && entry.message?.content) {
-          const text = typeof entry.message.content === "string"
-            ? entry.message.content
-            : entry.message.content.find((b: any) => b.type === "text")?.text ?? "";
+        if (preview.headMessages.length < previewLines &&
+            (entry.type === "user" || entry.type === "assistant")) {
+          const text = extractMessageText(entry);
           if (text) {
-            preview.firstUserMessage = text.slice(0, 200);
+            preview.headMessages.push({
+              role: entry.type as "user" | "assistant",
+              text: text.slice(0, 200),
+            });
           }
         }
-        if (preview.firstUserMessage && preview.gitBranch && preview.cwd) break;
       } catch {}
     }
 
-    // Scan tail for last user message
+    // Scan tail for last messages
     const tailSize = Math.min(size, PREVIEW_SCAN_BYTES);
     const tailOffset = Math.max(0, size - tailSize);
     const tailBuf = Buffer.alloc(tailSize);
@@ -258,16 +278,27 @@ export function extractSessionPreview(filePath: string): SessionPreview {
       if (!line.trim()) continue;
       try {
         const entry = JSON.parse(line);
-        if (entry.type === "user" && entry.message?.content) {
-          const text = typeof entry.message.content === "string"
-            ? entry.message.content
-            : entry.message.content.find((b: any) => b.type === "text")?.text ?? "";
+        if (preview.tailMessages.length < previewLines &&
+            (entry.type === "user" || entry.type === "assistant")) {
+          const text = extractMessageText(entry);
           if (text) {
-            preview.lastUserMessage = text.slice(0, 200);
-            break;
+            preview.tailMessages.unshift({
+              role: entry.type as "user" | "assistant",
+              text: text.slice(0, 200),
+            });
           }
         }
+        if (preview.tailMessages.length >= previewLines) break;
       } catch {}
+    }
+
+    // Deduplicate: if session is short, head and tail may overlap
+    if (preview.headMessages.length > 0 && preview.tailMessages.length > 0) {
+      const headLast = preview.headMessages[preview.headMessages.length - 1];
+      const tailFirst = preview.tailMessages[0];
+      if (headLast.text === tailFirst.text && headLast.role === tailFirst.role) {
+        preview.tailMessages = [];
+      }
     }
   } catch {}
 
