@@ -521,6 +521,7 @@ export async function querySelf(
     };
   }
 
+  const allSessions = listAllSessionFiles();
   const session = allSessions.find(s => s.sessionId === callingSessionId);
   if (!session) {
     return {
@@ -638,6 +639,7 @@ export async function queryAncestors(
     return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };
   }
 
+  const allSessions = listAllSessionFiles();
   const session = allSessions.find(s => s.sessionId === callingSessionId);
   if (!session) {
     return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };
