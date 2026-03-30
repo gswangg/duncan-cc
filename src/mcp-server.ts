@@ -463,7 +463,7 @@ async function handleListSessions(args: {
     const resolved = resolveSessionFiles({
       mode: args.mode as any,
       projectDir,
-      cwd: args.cwd,
+      cwd: args.cwd ?? findCallingSession()?.cwd,
       limit: args.limit ?? 20,
     });
 
