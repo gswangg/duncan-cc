@@ -11,130 +11,6 @@ import type { CCMessage, ParsedSession } from "./parser.js";
 import { isCompactBoundary } from "./parser.js";
 
 // ============================================================================
-// Preserved Segment Relinking — CC's wHY()
-// ============================================================================
-
-/**
- * Relink preserved segments after compaction.
- * 
- * When compaction preserves messages (messagesToKeep), the boundary marker
- * stores a preservedSegment with headUuid/tailUuid/anchorUuid. This function
- * relinks the tree so preserved messages are accessible via parentUuid walk.
- * 
- * Mutates the messages Map in place.
- */
-export function relinkPreservedSegments(messages: Map<string, CCMessage>): void {
-  // Find the last compact boundary and its index in insertion order
-  let lastBoundary: CCMessage | undefined;
-  let lastBoundaryIndex = -1;
-  let preservedSegment: { headUuid: string; tailUuid: string; anchorUuid: string } | undefined;
-  let index = 0;
-
-  for (const entry of messages.values()) {
-    if (isCompactBoundary(entry)) {
-      lastBoundaryIndex = index;
-      const seg = entry.compactMetadata?.preservedSegment;
-      if (seg) {
-        preservedSegment = seg;
-        lastBoundary = entry;
-      }
-    }
-    index++;
-  }
-
-  if (!preservedSegment || !lastBoundary) return;
-
-  const totalEntries = messages.size;
-  const isLastBoundary = lastBoundaryIndex === totalEntries - 1 ||
-    // Check if this is the last boundary (no later boundaries exist)
-    (() => {
-      let idx = 0;
-      let lastBIdx = -1;
-      for (const entry of messages.values()) {
-        if (isCompactBoundary(entry)) lastBIdx = idx;
-        idx++;
-      }
-      return lastBIdx === lastBoundaryIndex;
-    })();
-
-  // Identify preserved segment by walking from tail to head
-  const preservedUuids = new Set<string>();
-  if (isLastBoundary) {
-    const visited = new Set<string>();
-    let current = messages.get(preservedSegment.tailUuid);
-    let foundHead = false;
-
-    while (current && !visited.has(current.uuid)) {
-      visited.add(current.uuid);
-      preservedUuids.add(current.uuid);
-      if (current.uuid === preservedSegment.headUuid) {
-        foundHead = true;
-        break;
-      }
-      current = current.parentUuid ? messages.get(current.parentUuid) : undefined;
-    }
-
-    if (!foundHead) {
-      // Walk broken — can't relink
-      return;
-    }
-  }
-
-  if (isLastBoundary) {
-    // Relink head: head.parentUuid = anchorUuid
-    const head = messages.get(preservedSegment.headUuid);
-    if (head) {
-      messages.set(preservedSegment.headUuid, {
-        ...head,
-        parentUuid: preservedSegment.anchorUuid,
-      });
-    }
-
-    // Relink followers: messages with parentUuid === anchorUuid (except head) → parentUuid = tailUuid
-    for (const [uuid, msg] of messages) {
-      if (msg.parentUuid === preservedSegment.anchorUuid && uuid !== preservedSegment.headUuid) {
-        messages.set(uuid, {
-          ...msg,
-          parentUuid: preservedSegment.tailUuid,
-        });
-      }
-    }
-
-    // Zero out usage for assistant messages in preserved segment
-    for (const uuid of preservedUuids) {
-      const msg = messages.get(uuid);
-      if (msg?.type !== "assistant") continue;
-      messages.set(uuid, {
-        ...msg,
-        message: {
-          ...msg.message,
-          usage: {
-            ...msg.message.usage,
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-          },
-        },
-      });
-    }
-  }
-
-  // Delete pre-boundary messages not in preserved segment
-  const toDelete: string[] = [];
-  let idx = 0;
-  for (const [uuid] of messages) {
-    if (idx < lastBoundaryIndex && !preservedUuids.has(uuid)) {
-      toDelete.push(uuid);
-    }
-    idx++;
-  }
-  for (const uuid of toDelete) {
-    messages.delete(uuid);
-  }
-}
-
-// ============================================================================
 // Leaf Detection
 // ============================================================================
 
@@ -355,34 +231,14 @@ export function getCompactionWindows(chain: CCMessage[]): CompactionWindow[] {
 // ============================================================================
 
 /**
- * Full pipeline: parse → relink → find leaf → walk → return chain.
- * Returns the raw chain (before normalization).
- *
- * Note: relinkPreservedSegments deletes pre-boundary messages from the map,
- * so this only returns the active chain (post-last-boundary). For the full
- * chain across all compaction windows, use buildFullChain instead.
- */
-export function buildRawChain(parsed: ParsedSession): CCMessage[] {
-  // Step 1: Relink preserved segments (mutates the map)
-  relinkPreservedSegments(parsed.messages);
-
-  // Step 2: Find the best leaf
-  const leaf = findBestLeaf(parsed.messages);
-  if (!leaf) return [];
-
-  // Step 3: Walk the chain
-  return walkChain(parsed.messages, leaf);
-}
-
-/**
- * Build the full chain across all compaction boundaries.
+ * Build the session's message chain, reconstructing across compaction boundaries.
  *
  * After compaction, compact_boundary entries have parentUuid=null, creating
- * disconnected subtrees. buildRawChain only walks from the latest leaf and
- * stops at the first null parentUuid — missing all pre-compaction messages.
+ * disconnected subtrees. A naive walk from the latest leaf stops at the first
+ * null parentUuid, missing all pre-compaction messages.
  *
  * This function reconstructs the complete chain by:
- * 1. Snapshotting entries in JSONL (insertion) order before any mutations
+ * 1. Snapshotting entries in JSONL (insertion) order
  * 2. Splitting at compact_boundary entries
  * 3. Walking each subtree independently from its best leaf
  * 4. Concatenating with boundaries between segments
@@ -390,8 +246,7 @@ export function buildRawChain(parsed: ParsedSession): CCMessage[] {
  * The result can be passed to getCompactionWindows to split into independently
  * queryable windows.
  */
-export function buildFullChain(parsed: ParsedSession): CCMessage[] {
-  // Snapshot in JSONL order before any destructive operations
+export function buildRawChain(parsed: ParsedSession): CCMessage[] {
   const allEntries = [...parsed.messages.values()];
 
   const boundaryIndices: number[] = [];
@@ -401,9 +256,11 @@ export function buildFullChain(parsed: ParsedSession): CCMessage[] {
     }
   }
 
-  // No boundaries — fall back to standard pipeline
+  // No boundaries — single subtree, simple walk
   if (boundaryIndices.length === 0) {
-    return buildRawChain(parsed);
+    const leaf = findBestLeaf(parsed.messages);
+    if (!leaf) return [];
+    return walkChain(parsed.messages, leaf);
   }
 
   const result: CCMessage[] = [];

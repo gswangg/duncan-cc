@@ -398,7 +398,6 @@ export async function queryBatch(
     try {
       const windows = processSessionWindows(session.path, {
         agentType: session.agentType,
-        fullChain: true,
       });
       const isCalling = session.sessionId === callingSessionId;
 
@@ -646,10 +645,8 @@ export async function queryAncestors(
     return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };
   }
 
-  // Get all windows, drop the last (active) one.
-  // fullChain: true reconstructs orphaned pre-compaction subtrees so we get
-  // ancestor windows — without it, buildRawChain only walks the active chain.
-  const allWindows = processSessionWindows(session.path, { fullChain: true });
+  // Get all windows, drop the last (active) one
+  const allWindows = processSessionWindows(session.path);
   const ancestorWindows = allWindows.slice(0, -1).filter(w => w.messages.length > 0);
 
   if (ancestorWindows.length === 0) {
@@ -762,7 +759,7 @@ export async function querySubagents(
   const allTargets: Array<{ sessionFile: string; sessionId: string; pipeline: WindowPipelineResult }> = [];
   for (const sub of subagentFiles) {
     try {
-      const windows = processSessionWindows(sub.path, { agentType: sub.agentType, fullChain: true });
+      const windows = processSessionWindows(sub.path, { agentType: sub.agentType });
       for (const w of windows) {
         if (w.messages.length === 0) continue;
         allTargets.push({ sessionFile: sub.path, sessionId: sub.sessionId, pipeline: w });

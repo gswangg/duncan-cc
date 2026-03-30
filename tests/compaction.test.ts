@@ -4,7 +4,7 @@
  */
 
 import { parseSession } from "../src/parser.js";
-import { relinkPreservedSegments, findBestLeaf, walkChain, sliceFromBoundary, getCompactionWindows } from "../src/tree.js";
+import { buildRawChain, findBestLeaf, walkChain, sliceFromBoundary, getCompactionWindows } from "../src/tree.js";
 
 let passed = 0;
 let failed = 0;
@@ -67,14 +67,13 @@ console.log("\n--- One boundary, no preserved segment ---");
   const content = buildSession([
     userMsg(u1, null, "old message"),
     assistantMsg(a1, u1, "old reply"),
-    compactBoundary(b, a1),
+    compactBoundary(b, null as any),
     summaryEntry(b, "Summary of old conversation"),
     userMsg(u2, b, "new message"),
     assistantMsg(a2, u2, "new reply"),
   ]);
   const parsed = parseSession(content);
-  const leaf = findBestLeaf(parsed.messages)!;
-  const chain = walkChain(parsed.messages, leaf);
+  const chain = buildRawChain(parsed);
 
   // vk slicing: should start from boundary
   const sliced = sliceFromBoundary(chain);
@@ -94,50 +93,27 @@ console.log("\n--- One boundary with preserved segment ---");
   const b = id(), u3 = id(), a3 = id();
 
   // u1 → a1 → u2 → a2 → boundary(preserves u2,a2) → u3 → a3
+  // In real CC, boundary has parentUuid=null, orphaning the pre-boundary subtree.
   const content = buildSession([
     userMsg(u1, null, "very old"),
     assistantMsg(a1, u1, "very old reply"),
     userMsg(u2, a1, "kept message"),
     assistantMsg(a2, u2, "kept reply"),
-    compactBoundary(b, a2, { headUuid: u2, tailUuid: a2, anchorUuid: b }),
+    compactBoundary(b, null as any, { headUuid: u2, tailUuid: a2, anchorUuid: b }),
     userMsg(u3, b, "new message"),
     assistantMsg(a3, u3, "new reply"),
   ]);
   const parsed = parseSession(content);
 
-  // Before relinking
-  assert(parsed.messages.has(u1), "u1 exists before relink");
+  // buildRawChain reconstructs across boundaries — all messages present
+  const chain = buildRawChain(parsed);
+  assert(chain.length === 7, `chain length 7 (got ${chain.length})`);
 
-  // Relink
-  relinkPreservedSegments(parsed.messages);
-
-  // After relinking: u1 and a1 should be deleted (pre-boundary, not preserved)
-  assert(!parsed.messages.has(u1), "u1 deleted after relink");
-  assert(!parsed.messages.has(a1), "a1 deleted after relink");
-
-  // Preserved messages should still exist
-  assert(parsed.messages.has(u2), "u2 preserved");
-  assert(parsed.messages.has(a2), "a2 preserved");
-
-  // u2 should now point to boundary as parent (relinked)
-  const u2msg = parsed.messages.get(u2)!;
-  assert(u2msg.parentUuid === b, "u2.parentUuid = boundary (relinked)");
-
-  // u3 should point to a2 (tail of preserved segment)
-  const u3msg = parsed.messages.get(u3)!;
-  assert(u3msg.parentUuid === a2, "u3.parentUuid = a2 (relinked to tail)");
-
-  // Walk should work: boundary → u2 → a2 → u3 → a3
-  // Wait, the walk goes from leaf (a3) up: a3 → u3 → a2 → u2 → boundary
-  const leaf = findBestLeaf(parsed.messages)!;
-  const chain = walkChain(parsed.messages, leaf);
-
-  assert(chain.length === 5, `chain length 5 (got ${chain.length})`);
-  assert(chain[0].uuid === b, "chain starts at boundary");
-  assert(chain[1].uuid === u2, "chain[1] = preserved u2");
-  assert(chain[2].uuid === a2, "chain[2] = preserved a2");
-  assert(chain[3].uuid === u3, "chain[3] = new u3");
-  assert(chain[4].uuid === a3, "chain[4] = new a3");
+  // Preserved messages appear in ancestor window (pre-boundary subtree)
+  const windows = getCompactionWindows(chain);
+  assert(windows.length === 2, `2 windows (got ${windows.length})`);
+  assert(windows[0].messages.length === 4, "window 0: all pre-boundary msgs including preserved");
+  assert(windows[1].messages.length === 3, "window 1: boundary + new messages");
 
   ok("preserved segment: relinked correctly, walk correct");
 }
@@ -151,16 +127,15 @@ console.log("\n--- Two boundaries: three windows ---");
   const content = buildSession([
     userMsg(u1, null, "first"),
     assistantMsg(a1, u1, "first reply"),
-    compactBoundary(b1, a1),
+    compactBoundary(b1, null as any),
     userMsg(u2, b1, "second"),
     assistantMsg(a2, u2, "second reply"),
-    compactBoundary(b2, a2),
+    compactBoundary(b2, null as any),
     userMsg(u3, b2, "third"),
     assistantMsg(a3, u3, "third reply"),
   ]);
   const parsed = parseSession(content);
-  const leaf = findBestLeaf(parsed.messages)!;
-  const chain = walkChain(parsed.messages, leaf);
+  const chain = buildRawChain(parsed);
 
   const windows = getCompactionWindows(chain);
   assert(windows.length === 3, `3 windows (got ${windows.length})`);
@@ -184,13 +159,12 @@ console.log("\n--- Model extraction per window ---");
   const content = buildSession([
     userMsg(u1, null, "hello"),
     { ...assistantMsg(a1, u1, "hi"), message: { role: "assistant", content: [{ type: "text", text: "hi" }], model: "claude-opus-4-6" } },
-    compactBoundary(b1, a1),
+    compactBoundary(b1, null as any),
     userMsg(u2, b1, "hello again"),
     { ...assistantMsg(a2, u2, "hi again"), message: { role: "assistant", content: [{ type: "text", text: "hi again" }], model: "claude-sonnet-4-20250514" } },
   ]);
   const parsed = parseSession(content);
-  const leaf = findBestLeaf(parsed.messages)!;
-  const chain = walkChain(parsed.messages, leaf);
+  const chain = buildRawChain(parsed);
   const windows = getCompactionWindows(chain);
 
   assert(windows[0].modelInfo?.modelId === "claude-opus-4-6", "window 0: opus");
