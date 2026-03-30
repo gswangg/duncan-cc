@@ -8,7 +8,7 @@ import { mkdirSync, writeFileSync, rmSync, statSync, existsSync } from "node:fs"
 import { randomUUID } from "node:crypto";
 import {
   findCallingSession,
-  resolveSessionFilesExcludingSelf,
+  resolveSessionFiles,
   listSessionFiles,
   type SessionFileInfo,
 } from "../src/discovery.js";
@@ -202,10 +202,10 @@ if (existsSync(TESTDATA)) {
 }
 
 // ============================================================================
-// Tests: resolveSessionFilesExcludingSelf
+// Tests: window-level self-exclusion via findCallingSession + resolveSessionFiles
 // ============================================================================
 
-console.log("\n--- resolveSessionFilesExcludingSelf: excludes calling session ---");
+console.log("\n--- self-exclusion: identifies calling session among project sessions ---");
 {
   const dir = join(TMPDIR, "resolve-exclude");
   const toolUseId = "toolu_01ResolveExclude000000000";
@@ -214,52 +214,51 @@ console.log("\n--- resolveSessionFilesExcludingSelf: excludes calling session --
   createSessionFile(dir, "dormant-session-1", "toolu_01Dormant1Pad0000000000");
   createSessionFile(dir, "dormant-session-2", "toolu_01Dormant2Pad0000000000");
 
-  const result = resolveSessionFilesExcludingSelf({
+  const result = resolveSessionFiles({
     mode: "project",
     projectDir: dir,
-    toolUseId,
   });
 
-  assert(result.excludedSessionId === "active-session", `excluded: ${result.excludedSessionId}`);
-  assert(result.sessions.length === 2, `2 sessions remain: ${result.sessions.length}`);
-  assert(result.totalCount === 2, `totalCount adjusted: ${result.totalCount}`);
-  assert(
-    result.sessions.every((s) => s.sessionId !== "active-session"),
-    "active session not in results",
-  );
-  ok("excludes calling session, returns others");
+  // All sessions are returned (no session-level exclusion)
+  assert(result.sessions.length === 3, `all 3 sessions returned: ${result.sessions.length}`);
+
+  // findCallingSession identifies the right one for window-level filtering
+  const callingId = findCallingSession(toolUseId, result.sessions);
+  assert(callingId === "active-session", `calling session identified: ${callingId}`);
+  ok("identifies calling session, returns all sessions for window-level filtering");
 }
 
-console.log("\n--- resolveSessionFilesExcludingSelf: no toolUseId → no exclusion ---");
+console.log("\n--- self-exclusion: no toolUseId → no calling session identified ---");
 {
   const dir = join(TMPDIR, "resolve-no-id");
   createSessionFile(dir, "session-a", "toolu_01SessionA000000000000");
   createSessionFile(dir, "session-b", "toolu_01SessionB000000000000");
 
-  const result = resolveSessionFilesExcludingSelf({
+  const result = resolveSessionFiles({
     mode: "project",
     projectDir: dir,
   });
 
-  assert(result.excludedSessionId === null, `no exclusion: ${result.excludedSessionId}`);
+  const callingId = findCallingSession("", result.sessions);
+  assert(callingId === null, `no calling session: ${callingId}`);
   assert(result.sessions.length === 2, `all sessions returned: ${result.sessions.length}`);
-  ok("no exclusion when toolUseId not provided");
+  ok("no calling session when toolUseId empty");
 }
 
-console.log("\n--- resolveSessionFilesExcludingSelf: toolUseId not found → no exclusion ---");
+console.log("\n--- self-exclusion: toolUseId not found → no calling session identified ---");
 {
   const dir = join(TMPDIR, "resolve-miss");
   createSessionFile(dir, "session-x", "toolu_01SessionX000000000000");
 
-  const result = resolveSessionFilesExcludingSelf({
+  const result = resolveSessionFiles({
     mode: "project",
     projectDir: dir,
-    toolUseId: "toolu_01CompletelyUnknown000000",
   });
 
-  assert(result.excludedSessionId === null, `no exclusion: ${result.excludedSessionId}`);
+  const callingId = findCallingSession("toolu_01CompletelyUnknown000000", result.sessions);
+  assert(callingId === null, `no calling session: ${callingId}`);
   assert(result.sessions.length === 1, `all sessions returned: ${result.sessions.length}`);
-  ok("no exclusion when toolUseId not found in any file");
+  ok("no calling session when toolUseId not in any file");
 }
 
 // ============================================================================

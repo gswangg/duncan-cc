@@ -3,7 +3,7 @@
  */
 
 import { join, basename } from "node:path";
-import { listSessionFiles, listSubagentFiles, listAllSessionFiles, resolveSessionFiles } from "../src/discovery.js";
+import { listSessionFiles, listSubagentFiles, listAllSessionFiles, resolveSessionFiles, cwdToProjectDirName } from "../src/discovery.js";
 import { requireCorpus } from "./_skip-if-no-corpus.js";
 
 const TESTDATA = requireCorpus();
@@ -116,6 +116,53 @@ console.log("\n--- Session Discovery: routing ---");
     assert(paginated.hasMore, "pagination: has more");
     ok("pagination works");
   }
+}
+
+// ============================================================================
+// Project dir hashing
+// ============================================================================
+
+console.log("\n--- Project dir hashing ---");
+
+// Basic path
+{
+  const result = cwdToProjectDirName("/Users/foo/bar");
+  assert(result === "-Users-foo-bar", `basic: ${result}`);
+  ok(`basic: /Users/foo/bar → ${result}`);
+}
+
+// Path with spaces, dots, underscores
+{
+  const result = cwdToProjectDirName("/Users/foo/my project.v2_test");
+  assert(result === "-Users-foo-my-project-v2-test", `special chars: ${result}`);
+  ok(`special chars: → ${result}`);
+}
+
+// Path with hyphens (already valid)
+{
+  const result = cwdToProjectDirName("/Users/foo/my-project");
+  assert(result === "-Users-foo-my-project", `hyphens: ${result}`);
+  ok(`hyphens preserved: → ${result}`);
+}
+
+// Long path (>200 chars) gets hash suffix
+{
+  const longPath = "/Users/foo/" + "a".repeat(250);
+  const result = cwdToProjectDirName(longPath);
+  assert(result.length > 200, `long path result length: ${result.length}`);
+  assert(result.startsWith("-Users-foo-"), `long path prefix: ${result.slice(0, 20)}`);
+  // Should have hash suffix after the 200-char truncation
+  const base = longPath.replace(/[^a-zA-Z0-9]/g, "-").slice(0, 200);
+  assert(result.startsWith(base), `long path starts with truncated base`);
+  ok(`long path: ${result.length} chars with hash suffix`);
+}
+
+// Deterministic — same input always same output
+{
+  const a = cwdToProjectDirName("/some/path with spaces/and.dots");
+  const b = cwdToProjectDirName("/some/path with spaces/and.dots");
+  assert(a === b, `deterministic: ${a} !== ${b}`);
+  ok(`deterministic hashing`);
 }
 
 // ============================================================================

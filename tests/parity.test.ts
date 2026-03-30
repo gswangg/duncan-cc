@@ -8,7 +8,7 @@ import { parseSession } from "../src/parser.js";
 import { buildRawChain } from "../src/tree.js";
 import { normalizeMessages } from "../src/normalize.js";
 import { applyContentReplacements } from "../src/content-replacements.js";
-import { processSessionFile } from "../src/pipeline.js";
+import { processSessionFile, processSessionWindows } from "../src/pipeline.js";
 import { listSubagentFiles } from "../src/discovery.js";
 import { requireCorpus } from "./_skip-if-no-corpus.js";
 
@@ -218,6 +218,34 @@ console.log("\n--- Subagent processing ---");
     } catch {}
   }
   ok("subagent sessions process through full pipeline");
+}
+
+console.log("\n--- Subagent agent type detection ---");
+{
+  const codexSession = join(TESTDATA,
+    "-Users-wednesdayniemeyer-Documents-gniemeyer-Projects-codex",
+    "630fd2b9-d94d-4287-8c24-e225fbedfc5c.jsonl");
+  
+  const subagents = listSubagentFiles(codexSession);
+  
+  // Check that .meta.json is read and agentType is populated
+  const withType = subagents.filter(s => s.agentType);
+  assert(withType.length > 0, `${withType.length} subagents have agentType from .meta.json`);
+  
+  const exploreAgents = withType.filter(s => s.agentType === "Explore");
+  assert(exploreAgents.length > 0, `${exploreAgents.length} Explore agents found`);
+  ok(`agent type detection: ${withType.length} typed, ${exploreAgents.length} Explore`);
+
+  // Verify that Explore subagents get the right system prompt via pipeline
+  const exploreSub = exploreAgents[0];
+  const windows = processSessionWindows(exploreSub.path, { agentType: exploreSub.agentType });
+  if (windows.length > 0) {
+    assert(windows[0].systemPrompt.includes("file search specialist"),
+      "Explore subagent gets search specialist prompt");
+    assert(!windows[0].systemPrompt.includes("interactive agent"),
+      "Explore subagent does NOT get standard session prompt");
+    ok("Explore subagent system prompt correctly dispatched");
+  }
 }
 
 // ============================================================================

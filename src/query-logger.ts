@@ -4,10 +4,12 @@
  * Appends structured records to ~/.claude/duncan.jsonl for every query.
  * Captures tokens, latency, cache hits, routing strategy, and results.
  * Append-only JSONL — easy to process with standard tools.
+ * 
+ * Override log path with DUNCAN_LOG env var.
  */
 
-import { appendFileSync, mkdirSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
 // ============================================================================
@@ -27,6 +29,8 @@ export interface DuncanLogRecord {
   targetSession: string;
   /** Window index within the session */
   windowIndex: number;
+  /** Window type: main (active), compaction (prior), or subagent */
+  windowType: string;
   /** Source session ID (the calling session, if known) */
   sourceSession: string | null;
   /** Routing strategy used */
@@ -55,11 +59,20 @@ let logPath: string | null = null;
 
 function getLogPath(): string {
   if (!logPath) {
-    const claudeDir = join(homedir(), ".claude");
-    if (!existsSync(claudeDir)) {
-      mkdirSync(claudeDir, { recursive: true });
+    // Allow override via env var
+    if (process.env.DUNCAN_LOG) {
+      logPath = process.env.DUNCAN_LOG;
+      const dir = dirname(logPath);
+      if (!existsSync(dir)) {
+        mkdirSync(dir, { recursive: true });
+      }
+    } else {
+      const claudeDir = join(homedir(), ".claude");
+      if (!existsSync(claudeDir)) {
+        mkdirSync(claudeDir, { recursive: true });
+      }
+      logPath = join(claudeDir, "duncan.jsonl");
     }
-    logPath = join(claudeDir, "duncan.jsonl");
   }
   return logPath;
 }
@@ -77,6 +90,28 @@ export function recordQuery(record: DuncanLogRecord): void {
 }
 
 /**
+ * Read all query log records from the log file.
+ * Returns empty array if file doesn't exist or is unreadable.
+ */
+export function readQueryLog(path?: string): DuncanLogRecord[] {
+  const logFile = path ?? getLogPath();
+  try {
+    if (!existsSync(logFile)) return [];
+    const content = readFileSync(logFile, "utf-8");
+    const records: DuncanLogRecord[] = [];
+    for (const line of content.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        records.push(JSON.parse(line));
+      } catch {}
+    }
+    return records;
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Helper to create a log record from query context.
  */
 export function buildLogRecord(opts: {
@@ -86,6 +121,7 @@ export function buildLogRecord(opts: {
   hasContext: boolean;
   targetSession: string;
   windowIndex: number;
+  windowType?: string;
   sourceSession?: string | null;
   strategy: string;
   model: string;
@@ -104,6 +140,7 @@ export function buildLogRecord(opts: {
     hasContext: opts.hasContext,
     targetSession: opts.targetSession,
     windowIndex: opts.windowIndex,
+    windowType: opts.windowType ?? "main",
     sourceSession: opts.sourceSession ?? null,
     strategy: opts.strategy,
     model: opts.model,

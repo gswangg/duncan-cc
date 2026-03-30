@@ -13,7 +13,7 @@ import { parseSession, type ParsedSession } from "./parser.js";
 import { buildRawChain, sliceFromBoundary, stripInternalFields, getCompactionWindows, type CompactionWindow } from "./tree.js";
 import { normalizeMessages } from "./normalize.js";
 import { applyContentReplacements, microcompact } from "./content-replacements.js";
-import { injectUserContext, buildSystemPromptString, extractToolNames, type SystemPromptOptions } from "./system-prompt.js";
+import { injectUserContext, buildSystemPromptString, buildSubagentSystemPrompt, extractToolNames, type SystemPromptOptions } from "./system-prompt.js";
 import type { CCMessage } from "./parser.js";
 
 // ============================================================================
@@ -66,6 +66,8 @@ export interface PipelineOptions {
   skipSystemPrompt?: boolean;
   /** CC project directory (~/.claude/projects/<hash>/) for memory loading */
   projectDir?: string | null;
+  /** Agent type for subagent transcripts (from .meta.json) */
+  agentType?: string | null;
 }
 
 // ============================================================================
@@ -192,6 +194,8 @@ export function processSession(
 
 export interface WindowPipelineResult extends PipelineResult {
   windowIndex: number;
+  /** For subagent windows: the agent type (e.g., "Explore", "Plan") */
+  agentType?: string | null;
 }
 
 /**
@@ -231,13 +235,15 @@ export function processSessionWindows(
     }
 
     const modelInfo = window.modelInfo;
+    const promptOpts = {
+      cwd: sessionCwd,
+      modelId: modelInfo?.modelId,
+    };
     const systemPrompt = opts.skipSystemPrompt
       ? ""
-      : buildSystemPromptString({
-          cwd: sessionCwd,
-          modelId: modelInfo?.modelId,
-          modelName: modelInfo?.modelId,
-        });
+      : opts.agentType
+        ? buildSubagentSystemPrompt(opts.agentType, promptOpts)
+        : buildSystemPromptString(promptOpts);
 
     return {
       windowIndex: window.windowIndex,
@@ -246,6 +252,7 @@ export function processSessionWindows(
       modelInfo,
       rawMessageCount: window.messages.length,
       sessionCwd,
+      agentType: opts.agentType ?? null,
     };
   });
 }

@@ -11,6 +11,7 @@
  *   node dist/mcp-server.js
  */
 
+import { join } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -19,7 +20,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { processSessionFile, processSessionWindows } from "./pipeline.js";
-import { resolveSessionFiles, resolveSessionFilesExcludingSelf, getProjectsDir, listAllSessionFiles, listProjects, extractGitBranch } from "./discovery.js";
+import { resolveSessionFiles, getProjectsDir, listAllSessionFiles, listProjects, extractGitBranch, extractSessionPreview, cwdToProjectDirName } from "./discovery.js";
 import { querySingleWindow, queryBatch, querySelf, queryAncestors, querySubagents } from "./query.js";
 
 // ============================================================================
@@ -27,7 +28,7 @@ import { querySingleWindow, queryBatch, querySelf, queryAncestors, querySubagent
 // ============================================================================
 
 const server = new Server(
-  { name: "duncan-cc", version: "0.2.0" },
+  { name: "duncan-cc", version: "0.3.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -125,7 +126,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "duncan_list_sessions",
-      description: "List available Claude Code sessions. Use to discover sessions before querying.",
+      description:
+        "List available Claude Code sessions with previews. " +
+        "Use to discover sessions before querying. " +
+        "Returns session IDs, timestamps, sizes, git branches, working directories, " +
+        "and first/last user message previews.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -136,7 +141,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           projectDir: {
             type: "string",
-            description: "For 'project' mode: project directory path.",
+            description: "For 'project' mode: explicit project directory path.",
+          },
+          projectPath: {
+            type: "string",
+            description: "For 'project' mode: original working directory path (resolved to project dir via CC's hashing).",
           },
           cwd: {
             type: "string",
@@ -145,6 +154,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           limit: {
             type: "number",
             description: "Max sessions to list (default: 20).",
+          },
+          previews: {
+            type: "boolean",
+            description: "Include first/last user message previews (default: true).",
           },
         },
         required: ["mode"],
@@ -445,13 +458,19 @@ async function handleListProjects(args: {
 async function handleListSessions(args: {
   mode: string;
   projectDir?: string;
+  projectPath?: string;
   cwd?: string;
   limit?: number;
+  previews?: boolean;
 }) {
   try {
+    // Resolve projectDir from projectPath if provided
+    const projectDir = args.projectDir
+      ?? (args.projectPath ? join(getProjectsDir(), cwdToProjectDirName(args.projectPath)) : undefined);
+
     const resolved = resolveSessionFiles({
       mode: args.mode as any,
-      projectDir: args.projectDir,
+      projectDir,
       cwd: args.cwd,
       limit: args.limit ?? 20,
     });
@@ -462,17 +481,36 @@ async function handleListSessions(args: {
       };
     }
 
+    const showPreviews = args.previews !== false;
+
     const lines = resolved.sessions.map((s) => {
       const date = s.mtime.toISOString().slice(0, 16);
       const size = s.size > 1024 * 1024
         ? `${(s.size / 1024 / 1024).toFixed(1)}MB`
         : `${(s.size / 1024).toFixed(0)}KB`;
-      return `${s.sessionId.slice(0, 12)}  ${date}  ${size}  ${s.projectDir.split("/").slice(-1)[0]}`;
+
+      let line = `**${s.sessionId.slice(0, 12)}**  ${date}  ${size}`;
+
+      if (showPreviews) {
+        const preview = extractSessionPreview(s.path);
+        if (preview.gitBranch) line += `  branch: ${preview.gitBranch}`;
+        if (preview.cwd) line += `\n  cwd: ${preview.cwd}`;
+        if (preview.firstUserMessage) {
+          const truncated = preview.firstUserMessage.replace(/\n/g, " ").slice(0, 120);
+          line += `\n  ▶ ${truncated}${preview.firstUserMessage.length > 120 ? "…" : ""}`;
+        }
+        if (preview.lastUserMessage && preview.lastUserMessage !== preview.firstUserMessage) {
+          const truncated = preview.lastUserMessage.replace(/\n/g, " ").slice(0, 120);
+          line += `\n  ◀ ${truncated}${preview.lastUserMessage.length > 120 ? "…" : ""}`;
+        }
+      }
+
+      return line;
     });
 
     const header = `${resolved.totalCount} sessions${resolved.hasMore ? ` (showing ${resolved.sessions.length})` : ""}:`;
     return {
-      content: [{ type: "text", text: `${header}\n\n${lines.join("\n")}` }],
+      content: [{ type: "text", text: `${header}\n\n${lines.join("\n\n")}` }],
     };
   } catch (err: any) {
     return {

@@ -77,14 +77,16 @@ Returns for each project:
 
 ### `duncan_list_sessions`
 
-List available sessions for a project or globally.
+List available sessions with previews. Returns session IDs, timestamps, sizes, git branches, working directories, and first/last user message previews.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `mode` | string | ✓ | — | `project` or `global` |
-| `projectDir` | string | | cwd-based | For `project` mode |
+| `projectDir` | string | | cwd-based | Explicit project directory path |
+| `projectPath` | string | | — | Original working directory (resolved to project dir via CC's hashing) |
 | `cwd` | string | | process.cwd() | Working directory |
 | `limit` | number | | 20 | Max sessions to list |
+| `previews` | boolean | | true | Include first/last user message previews |
 
 ## Routing Modes
 
@@ -163,6 +165,8 @@ When CC calls an MCP tool, it writes the assistant message (containing the `tool
 
 Duncan scans the last 32KB of candidate session files for this ID to deterministically identify the calling session — no configuration needed, safe for concurrent sessions.
 
+Self-exclusion is **window-level**: only the active (latest) window of the calling session is excluded. Compaction windows from the calling session are still searchable — they contain information that was summarized away from active context, exactly the kind of thing duncan should recover.
+
 ### System Prompt Reconstruction
 
 Duncan rebuilds the system prompt with full parity to CC's own prompt:
@@ -177,6 +181,11 @@ Duncan rebuilds the system prompt with full parity to CC's own prompt:
 - **Memory**: from CC project directory (`~/.claude/projects/<hash>/memory/MEMORY.md`)
 - **Tool-conditional instructions**: only included when the corresponding tools appear in the session (e.g., "use Read instead of cat" only when Read tool was used)
 - **Language**: configurable
+
+For **subagent transcripts**, the system prompt is dispatched based on agent type (read from `.meta.json` alongside the subagent JSONL file):
+- **Explore** → read-only search specialist prompt
+- **Plan** → software architect prompt (read-only)
+- **Unknown/custom** → falls back to the standard session prompt
 
 Tool schemas are NOT included — duncan sends only its own `duncan_response` tool. The session's original tools aren't callable during a duncan query.
 
@@ -193,12 +202,12 @@ This caches the session context (stable across queries) while letting the duncan
 Every query is logged to `~/.claude/duncan.jsonl` as append-only JSONL. Each record captures:
 
 - Batch ID, question, answer, hasContext flag
-- Target session, window index, source session
+- Target session, window index, window type (main/compaction/subagent), source session
 - Routing strategy, model used
 - Token counts (input, output, cache creation, cache read)
 - Latency in milliseconds, timestamp
 
-Process with standard tools: `cat ~/.claude/duncan.jsonl | jq .`
+Override the log path with `DUNCAN_LOG=/path/to/custom.jsonl`. Process with standard tools: `cat ~/.claude/duncan.jsonl | jq .`
 
 ### Progress Notifications
 
@@ -229,6 +238,7 @@ Duncan reads CC's native session storage:
 
 - **MCP server instructions** — CC injects MCP server `instructions` from the initialize handshake into the system prompt. These aren't persisted to disk, so duncan can't reconstruct them for dormant sessions. Equivalent to resuming a CC session with tools disconnected.
 - **Tool schemas** — only `duncan_response` is sent; the session's original tools aren't callable during a duncan query.
+- **Custom agent system prompts** — CC supports custom agents defined in `.claude/agents/<name>.md` with user-defined system prompts. Duncan handles built-in agent types (Explore, Plan) via `.meta.json` detection, but custom agent prompts are not available from the transcript — those sessions fall back to the standard prompt.
 - **Compaction test coverage** — compaction logic is tested with synthetic fixtures only. No real compacted sessions in the current test corpus (CC's 30-day `cleanupPeriodDays` default purged them before capture).
 
 ## Tests

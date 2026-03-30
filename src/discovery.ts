@@ -17,6 +17,33 @@ import { homedir } from "node:os";
 // Path resolution — mirrors CC's path layout
 // ============================================================================
 
+/** Max length before hash suffix is appended. Matches CC's constant. */
+const MAX_DIR_NAME_LENGTH = 200;
+
+/**
+ * Java's String.hashCode() — matches CC's A58() implementation.
+ * Used as fallback when not running under Bun.
+ */
+function javaStringHashCode(s: string): number {
+  let hash = 0;
+  for (let i = 0; i < s.length; i++) {
+    hash = ((hash << 5) - hash + s.charCodeAt(i)) | 0;
+  }
+  return hash;
+}
+
+/**
+ * Sanitize a path into a CC project directory name.
+ * Matches CC's X2() / TJK() — replaces all non-alphanumeric chars with '-',
+ * and appends a hash suffix (base36) for paths longer than 200 chars.
+ */
+export function cwdToProjectDirName(cwd: string): string {
+  const sanitized = cwd.replace(/[^a-zA-Z0-9]/g, "-");
+  if (sanitized.length <= MAX_DIR_NAME_LENGTH) return sanitized;
+  const hashSuffix = Math.abs(javaStringHashCode(cwd)).toString(36);
+  return `${sanitized.slice(0, MAX_DIR_NAME_LENGTH)}-${hashSuffix}`;
+}
+
 /** Get CC's projects directory */
 export function getProjectsDir(): string {
   return join(homedir(), ".claude", "projects");
@@ -27,25 +54,9 @@ export function getProjectDir(cwd: string): string | null {
   const projectsDir = getProjectsDir();
   if (!existsSync(projectsDir)) return null;
 
-  // CC hashes the cwd into the directory name
-  // The format is: the cwd with / replaced by - and leading - stripped
-  // e.g., /Users/foo/bar → -Users-foo-bar
-  const hashed = cwd.replace(/\//g, "-");
-
+  const hashed = cwdToProjectDirName(cwd);
   const fullPath = join(projectsDir, hashed);
   if (existsSync(fullPath)) return fullPath;
-
-  // Try to find by scanning (the hash might differ slightly)
-  try {
-    const dirs = readdirSync(projectsDir, { withFileTypes: true });
-    for (const d of dirs) {
-      if (!d.isDirectory()) continue;
-      // Check if the directory name ends with the last component(s) of cwd
-      if (d.name === hashed || d.name.endsWith(hashed)) {
-        return join(projectsDir, d.name);
-      }
-    }
-  } catch {}
 
   return null;
 }
@@ -60,6 +71,8 @@ export interface SessionFileInfo {
   mtime: Date;
   size: number;
   projectDir: string;
+  /** For subagents: agent type from .meta.json (e.g., "Explore", "Plan") */
+  agentType?: string | null;
 }
 
 /** List all session files in a project directory */
@@ -132,12 +145,24 @@ export function listSubagentFiles(sessionFile: string): SessionFileInfo[] {
         if (entry.isFile() && entry.name.endsWith(".jsonl")) {
           try {
             const stat = statSync(fullPath);
+
+            // Read .meta.json for agent type if it exists
+            const metaPath = fullPath.replace(".jsonl", ".meta.json");
+            let agentType: string | null = null;
+            if (existsSync(metaPath)) {
+              try {
+                const meta = JSON.parse(readFileSync(metaPath, "utf-8"));
+                agentType = meta.agentType ?? null;
+              } catch {}
+            }
+
             files.push({
               path: fullPath,
               sessionId: entry.name.replace(".jsonl", ""),
               mtime: stat.mtime,
               size: stat.size,
               projectDir: dirname(sessionFile),
+              agentType,
             });
           } catch {}
         } else if (entry.isDirectory()) {
@@ -151,6 +176,102 @@ export function listSubagentFiles(sessionFile: string): SessionFileInfo[] {
   // Sort by mtime, newest first (deterministic ordering)
   files.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
   return files;
+}
+
+// ============================================================================
+// Session preview extraction
+// ============================================================================
+
+/** Size of chunks to scan for preview data (bytes). */
+const PREVIEW_SCAN_BYTES = 16_384;
+
+export interface SessionPreview {
+  /** First user message text (truncated) */
+  firstUserMessage: string | null;
+  /** Last user message text (truncated) */
+  lastUserMessage: string | null;
+  /** Git branch */
+  gitBranch: string | null;
+  /** Working directory from session */
+  cwd: string | null;
+}
+
+/**
+ * Extract preview information from a session file by scanning head and tail.
+ * Avoids full parsing — reads only the first and last PREVIEW_SCAN_BYTES.
+ */
+export function extractSessionPreview(filePath: string): SessionPreview {
+  const preview: SessionPreview = {
+    firstUserMessage: null,
+    lastUserMessage: null,
+    gitBranch: null,
+    cwd: null,
+  };
+
+  try {
+    const stat = statSync(filePath);
+    const size = stat.size;
+    if (size === 0) return preview;
+
+    // Scan head for first user message, gitBranch, cwd
+    const headSize = Math.min(size, PREVIEW_SCAN_BYTES);
+    const headBuf = Buffer.alloc(headSize);
+    const fd = openSync(filePath, "r");
+    readSync(fd, headBuf, 0, headSize, 0);
+
+    const headText = headBuf.toString("utf-8");
+    const headLines = headText.split("\n");
+
+    for (const line of headLines) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (!preview.gitBranch && entry.gitBranch) {
+          preview.gitBranch = entry.gitBranch;
+        }
+        if (!preview.cwd && entry.cwd) {
+          preview.cwd = entry.cwd;
+        }
+        if (!preview.firstUserMessage && entry.type === "user" && entry.message?.content) {
+          const text = typeof entry.message.content === "string"
+            ? entry.message.content
+            : entry.message.content.find((b: any) => b.type === "text")?.text ?? "";
+          if (text) {
+            preview.firstUserMessage = text.slice(0, 200);
+          }
+        }
+        if (preview.firstUserMessage && preview.gitBranch && preview.cwd) break;
+      } catch {}
+    }
+
+    // Scan tail for last user message
+    const tailSize = Math.min(size, PREVIEW_SCAN_BYTES);
+    const tailOffset = Math.max(0, size - tailSize);
+    const tailBuf = Buffer.alloc(tailSize);
+    readSync(fd, tailBuf, 0, tailSize, tailOffset);
+    closeSync(fd);
+
+    const tailText = tailBuf.toString("utf-8");
+    const tailLines = tailText.split("\n").reverse();
+
+    for (const line of tailLines) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type === "user" && entry.message?.content) {
+          const text = typeof entry.message.content === "string"
+            ? entry.message.content
+            : entry.message.content.find((b: any) => b.type === "text")?.text ?? "";
+          if (text) {
+            preview.lastUserMessage = text.slice(0, 200);
+            break;
+          }
+        }
+      } catch {}
+    }
+  } catch {}
+
+  return preview;
 }
 
 // ============================================================================
@@ -216,12 +337,23 @@ export interface ProjectInfo {
 
 /**
  * Reconstruct the original cwd from a CC project directory name.
- * CC hashes cwd by replacing `/` with `-`, so `/Users/foo/bar` → `-Users-foo-bar`.
+ * CC sanitizes all non-alphanumeric chars to `-`, so this is inherently lossy
+ * (spaces, dots, underscores, hyphens all become `-`). We apply heuristics:
+ * - Leading `-` → `/` (absolute path)
+ * - `-Users-` or `-home-` prefix → `/Users/` or `/home/` (common OS paths)
+ * - Otherwise just replace `-` with `/` as a best guess
+ * 
+ * The result is approximate — callers should treat it as a display hint, not a reliable path.
  */
 function cwdFromDirName(dirName: string): string {
-  // Replace leading - and all subsequent - with /
-  // This is lossy if the original path contained hyphens, but it's the best we can do
-  return dirName.replace(/-/g, "/");
+  // Strip hash suffix if present (after the 200-char truncation point)
+  // Hash suffix is `-<base36>` at the end when original sanitized name was >200 chars
+  let name = dirName;
+  if (name.length > MAX_DIR_NAME_LENGTH) {
+    // Could have a hash suffix — but we can't reliably strip it without knowing
+    // the original, so just work with what we have
+  }
+  return name.replace(/-/g, "/");
 }
 
 /**
@@ -483,31 +615,4 @@ export function findCallingSession(
   return null;
 }
 
-/**
- * Resolve session files with self-exclusion.
- * 
- * Like `resolveSessionFiles` but also accepts a `toolUseId` to identify
- * and exclude the calling session from results.
- */
-export function resolveSessionFilesExcludingSelf(
-  params: RoutingParams,
-): RoutingResult & { excludedSessionId: string | null } {
-  const result = resolveSessionFiles(params);
 
-  if (!params.toolUseId || result.sessions.length === 0) {
-    return { ...result, excludedSessionId: null };
-  }
-
-  const excludedId = findCallingSession(params.toolUseId, result.sessions);
-  if (!excludedId) {
-    return { ...result, excludedSessionId: null };
-  }
-
-  const filtered = result.sessions.filter((s) => s.sessionId !== excludedId);
-  return {
-    sessions: filtered,
-    totalCount: result.totalCount - 1,
-    hasMore: result.hasMore,
-    excludedSessionId: excludedId,
-  };
-}

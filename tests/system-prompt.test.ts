@@ -7,7 +7,7 @@ import { join, basename } from "node:path";
 import { parseSession } from "../src/parser.js";
 import { buildRawChain } from "../src/tree.js";
 import { normalizeMessages } from "../src/normalize.js";
-import { buildSystemPrompt, buildSystemPromptString, injectUserContext } from "../src/system-prompt.js";
+import { buildSystemPrompt, buildSystemPromptString, buildSubagentSystemPrompt, injectUserContext } from "../src/system-prompt.js";
 import { requireCorpus } from "./_skip-if-no-corpus.js";
 
 const TESTDATA = requireCorpus();
@@ -225,6 +225,43 @@ console.log("\n--- System Prompt: model extraction from session ---");
     assert(prompt.includes(model), "system prompt includes session model");
     ok("system prompt uses session's model");
   }
+}
+
+// ============================================================================
+// Subagent system prompt dispatch
+// ============================================================================
+
+console.log("\n--- Subagent system prompt: Explore agent ---");
+{
+  const prompt = buildSubagentSystemPrompt("Explore", { cwd: "/tmp/test" });
+  assert(prompt.includes("file search specialist"), `explore prompt contains identity: ${prompt.slice(0, 50)}`);
+  assert(prompt.includes("READ-ONLY"), "explore prompt is read-only");
+  assert(!prompt.includes("# System"), "explore prompt does NOT include standard system rules");
+  ok("Explore agent gets dedicated search prompt");
+}
+
+console.log("\n--- Subagent system prompt: Plan agent ---");
+{
+  const prompt = buildSubagentSystemPrompt("Plan", { cwd: "/tmp/test" });
+  assert(prompt.includes("software architect"), `plan prompt contains identity: ${prompt.slice(0, 50)}`);
+  assert(prompt.includes("READ-ONLY"), "plan prompt is read-only");
+  assert(prompt.includes("Critical Files"), "plan prompt has required output format");
+  assert(!prompt.includes("# System"), "plan prompt does NOT include standard system rules");
+  ok("Plan agent gets dedicated architect prompt");
+}
+
+console.log("\n--- Subagent system prompt: unknown agent → standard prompt ---");
+{
+  const prompt = buildSubagentSystemPrompt("general-purpose", { cwd: "/tmp/test" });
+  assert(prompt.includes("interactive agent"), "unknown agent falls back to standard prompt");
+  ok("Unknown agent type falls back to standard prompt");
+}
+
+console.log("\n--- Subagent system prompt: null agent → standard prompt ---");
+{
+  const prompt = buildSubagentSystemPrompt(null, { cwd: "/tmp/test" });
+  assert(prompt.includes("interactive agent"), "null agent falls back to standard prompt");
+  ok("Null agent type falls back to standard prompt");
 }
 
 // ============================================================================

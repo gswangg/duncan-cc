@@ -106,6 +106,10 @@ The assistant message containing that tool_use is written to the session JSONL
 before the tool is invoked (`appendFileSync`). We scan the last 32KB of candidate
 session files for the ID to deterministically identify the calling session.
 
+Self-exclusion is window-level: only the active (last) window of the calling
+session is excluded. Compaction windows are kept — they contain context that was
+summarized away from the active window.
+
 ### Self mode
 
 Sends the question to N copies of the active window for sampling diversity.
@@ -158,6 +162,12 @@ Dynamic sections reconstructed from session context:
 
 This matches CC's own resume behavior: rebuild system prompt from current state.
 
+For subagent transcripts, the system prompt is dispatched based on agent type
+(read from `.meta.json` alongside the subagent JSONL):
+- **Explore**: read-only search specialist prompt
+- **Plan**: software architect prompt (read-only)
+- **Other/unknown**: falls back to the standard session prompt
+
 Note: tool schemas are NOT included — duncan sends only its own `duncan_response`
 tool. The session's original tools are not callable during a duncan query.
 
@@ -185,6 +195,13 @@ include `_meta.progressToken` in the request.
 CC injects MCP server `instructions` from the initialize handshake into the system
 prompt. Cannot reconstruct for dormant sessions — instructions are fetched live and
 not persisted to disk. Equivalent to resuming a CC session with tools disconnected.
+
+### Custom Agent System Prompts
+CC supports custom agents defined in `.claude/agents/<name>.md` with user-defined system
+prompts. Duncan handles built-in agent types (Explore, Plan) by reading the `.meta.json`
+file alongside subagent transcripts and dispatching the correct system prompt. Custom agent
+prompts are not recoverable from the transcript — those sessions fall back to the standard
+prompt.
 
 ### Compaction Test Coverage
 No real CC sessions with compaction boundaries in the test corpus (CC's 30-day

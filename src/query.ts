@@ -11,7 +11,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { processSessionFile, processSessionWindows, type PipelineResult, type WindowPipelineResult } from "./pipeline.js";
-import { resolveSessionFilesExcludingSelf, findCallingSession, listAllSessionFiles, listSubagentFiles, type RoutingParams, type RoutingResult } from "./discovery.js";
+import { resolveSessionFiles, findCallingSession, listAllSessionFiles, listSubagentFiles, type RoutingParams, type RoutingResult } from "./discovery.js";
 import { recordQuery, buildLogRecord } from "./query-logger.js";
 
 // ============================================================================
@@ -66,7 +66,7 @@ function oauthClientConfig(token: string): ResolvedAuth {
       "accept": "application/json",
       "anthropic-dangerous-direct-browser-access": "true",
       "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
-      "user-agent": "duncan-cc/0.2.0",
+      "user-agent": "duncan-cc/0.3.0",
       "x-app": "cli",
     },
   };
@@ -120,6 +120,7 @@ export interface DuncanQueryResult {
   sessionFile: string;
   sessionId: string;
   windowIndex: number;
+  windowType: "main" | "compaction" | "subagent";
   model: string;
   result: DuncanResult;
 }
@@ -136,8 +137,6 @@ export interface DuncanBatchResult {
 // ============================================================================
 // Single Session Query
 // ============================================================================
-
-const MAX_RETRIES = 3;
 
 /**
  * Query a single session window with a question.
@@ -200,46 +199,37 @@ export async function querySingleWindow(
 
   const startTime = Date.now();
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const response = await client.messages.create({
-      model,
-      system: systemBlocks.length > 0 ? systemBlocks : undefined,
-      messages: fixedMessages,
-      tools: [DUNCAN_RESPONSE_TOOL],
-      max_tokens: 16384,
-    });
+  // Use .stream() instead of .create() to avoid SDK timeout warnings
+  // on large contexts with high max_tokens. Accumulate via finalMessage().
+  const stream = client.messages.stream({
+    model,
+    system: systemBlocks.length > 0 ? systemBlocks : undefined,
+    messages: fixedMessages,
+    tools: [DUNCAN_RESPONSE_TOOL],
+    tool_choice: { type: "tool" as const, name: "duncan_response" },
+    max_tokens: 16384,
+  });
+  const response = await stream.finalMessage();
 
-    // Look for duncan_response tool call
-    const toolCall = response.content.find(
-      (c): c is Anthropic.ToolUseBlock => c.type === "tool_use" && c.name === "duncan_response",
-    );
+  // With tool_choice forced, the response must contain the tool call
+  const toolCall = response.content.find(
+    (c): c is Anthropic.ToolUseBlock => c.type === "tool_use" && c.name === "duncan_response",
+  );
 
-    if (toolCall) {
-      const input = toolCall.input as { hasContext: boolean; answer: string };
-      if (typeof input.hasContext === "boolean" && typeof input.answer === "string") {
-        const latencyMs = Date.now() - startTime;
-        return {
-          hasContext: input.hasContext,
-          answer: input.answer,
-          usage: response.usage as any,
-          latencyMs,
-        };
-      }
-    }
-
-    // Retry: ask the model to use the tool
-    if (attempt < MAX_RETRIES) {
-      fixedMessages.push(
-        { role: "assistant", content: response.content },
-        {
-          role: "user",
-          content: "You must respond by calling the duncan_response tool with { hasContext: boolean, answer: string }. Do not respond with plain text.",
-        },
-      );
+  if (toolCall) {
+    const input = toolCall.input as { hasContext: boolean; answer: string };
+    if (typeof input.hasContext === "boolean" && typeof input.answer === "string") {
+      const latencyMs = Date.now() - startTime;
+      return {
+        hasContext: input.hasContext,
+        answer: input.answer,
+        usage: response.usage as any,
+        latencyMs,
+      };
     }
   }
 
-  throw new Error(`Duncan query failed after ${MAX_RETRIES} retries: model did not produce a valid duncan_response tool call`);
+  throw new Error("Duncan query failed: model did not produce a valid duncan_response tool call despite tool_choice constraint");
 }
 
 // ============================================================================
@@ -262,6 +252,7 @@ function logBatchResults(
       hasContext: r.result.hasContext,
       targetSession: r.sessionId,
       windowIndex: r.windowIndex,
+      windowType: r.windowType,
       sourceSession,
       strategy,
       model: r.model,
@@ -290,7 +281,7 @@ export async function queryBatch(
   } = {},
 ): Promise<DuncanBatchResult> {
   const queryId = randomUUID();
-  const resolved = resolveSessionFilesExcludingSelf(routing);
+  const resolved = resolveSessionFiles(routing);
 
   if (resolved.sessions.length === 0) {
     return {
@@ -303,22 +294,43 @@ export async function queryBatch(
     };
   }
 
+  // Find the calling session for self-exclusion (window-level, not session-level).
+  // For the calling session: keep compaction windows, drop only the active (last) window.
+  // For all other sessions: include all windows.
+  const callingSessionId = routing.toolUseId
+    ? findCallingSession(routing.toolUseId, resolved.sessions)
+    : null;
+
   // Process each session into windows
   const targets: Array<{
     sessionFile: string;
     sessionId: string;
     pipeline: WindowPipelineResult;
+    windowType: "main" | "compaction";
   }> = [];
 
   for (const session of resolved.sessions) {
     try {
-      const windows = processSessionWindows(session.path);
-      for (const w of windows) {
+      const windows = processSessionWindows(session.path, {
+        agentType: session.agentType,
+      });
+      const isCalling = session.sessionId === callingSessionId;
+
+      for (let wi = 0; wi < windows.length; wi++) {
+        const w = windows[wi];
         if (w.messages.length === 0) continue;
+
+        const isActiveWindow = wi === windows.length - 1;
+        const windowType = isActiveWindow ? "main" as const : "compaction" as const;
+
+        // Self-exclusion: skip only the active window of the calling session
+        if (isCalling && isActiveWindow) continue;
+
         targets.push({
           sessionFile: session.path,
           sessionId: session.sessionId,
           pipeline: w,
+          windowType,
         });
       }
     } catch {
@@ -349,6 +361,7 @@ export async function queryBatch(
             sessionFile: target.sessionFile,
             sessionId: target.sessionId,
             windowIndex: target.pipeline.windowIndex,
+            windowType: target.windowType,
             model: target.pipeline.modelInfo?.modelId ?? "unknown",
             result,
           };
@@ -360,6 +373,7 @@ export async function queryBatch(
             sessionFile: target.sessionFile,
             sessionId: target.sessionId,
             windowIndex: target.pipeline.windowIndex,
+            windowType: target.windowType,
             model: target.pipeline.modelInfo?.modelId ?? "unknown",
             result: {
               hasContext: false,
@@ -381,7 +395,7 @@ export async function queryBatch(
     hasMore: resolved.hasMore,
     offset: routing.offset ?? 0,
   };
-  logBatchResults(batchResult, routing.mode, resolved.excludedSessionId);
+  logBatchResults(batchResult, routing.mode, callingSessionId);
   return batchResult;
 }
 
@@ -461,6 +475,7 @@ export async function querySelf(
         sessionFile: session.path,
         sessionId: session.sessionId,
         windowIndex: activeWindow.windowIndex,
+        windowType: "main" as const,
         model: activeWindow.modelInfo?.modelId ?? "unknown",
         result,
       };
@@ -472,6 +487,7 @@ export async function querySelf(
         sessionFile: session.path,
         sessionId: session.sessionId,
         windowIndex: activeWindow.windowIndex,
+        windowType: "main" as const,
         model: activeWindow.modelInfo?.modelId ?? "unknown",
         result: { hasContext: false, answer: `Error: ${err.message}` },
       };
@@ -577,6 +593,7 @@ export async function queryAncestors(
             sessionFile: session.path,
             sessionId: session.sessionId,
             windowIndex: window.windowIndex,
+            windowType: "compaction" as const,
             model: window.modelInfo?.modelId ?? "unknown",
             result,
           };
@@ -588,6 +605,7 @@ export async function queryAncestors(
             sessionFile: session.path,
             sessionId: session.sessionId,
             windowIndex: window.windowIndex,
+            windowType: "compaction" as const,
             model: window.modelInfo?.modelId ?? "unknown",
             result: { hasContext: false, answer: `Error: ${err.message}` },
           };
@@ -649,11 +667,11 @@ export async function querySubagents(
     return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset };
   }
 
-  // Expand subagent files to windows
+  // Expand subagent files to windows, passing agent type for prompt dispatch
   const allTargets: Array<{ sessionFile: string; sessionId: string; pipeline: WindowPipelineResult }> = [];
   for (const sub of subagentFiles) {
     try {
-      const windows = processSessionWindows(sub.path);
+      const windows = processSessionWindows(sub.path, { agentType: sub.agentType });
       for (const w of windows) {
         if (w.messages.length === 0) continue;
         allTargets.push({ sessionFile: sub.path, sessionId: sub.sessionId, pipeline: w });
@@ -688,6 +706,7 @@ export async function querySubagents(
           return {
             queryId, sessionFile: target.sessionFile, sessionId: target.sessionId,
             windowIndex: target.pipeline.windowIndex,
+            windowType: "subagent" as const,
             model: target.pipeline.modelInfo?.modelId ?? "unknown", result,
           };
         } catch (err: any) {
@@ -696,6 +715,7 @@ export async function querySubagents(
           return {
             queryId, sessionFile: target.sessionFile, sessionId: target.sessionId,
             windowIndex: target.pipeline.windowIndex,
+            windowType: "subagent" as const,
             model: target.pipeline.modelInfo?.modelId ?? "unknown",
             result: { hasContext: false, answer: `Error: ${err.message}` },
           };
