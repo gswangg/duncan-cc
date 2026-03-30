@@ -182,9 +182,6 @@ export function listSubagentFiles(sessionFile: string): SessionFileInfo[] {
 // Session preview extraction
 // ============================================================================
 
-/** Size of chunks to scan for preview data (bytes). */
-const PREVIEW_SCAN_BYTES = 16_384;
-
 export interface PreviewMessage {
   role: "user" | "assistant";
   text: string;
@@ -214,8 +211,9 @@ function extractMessageText(entry: any): string | null {
 }
 
 /**
- * Extract preview information from a session file by scanning head and tail.
- * Avoids full parsing — reads only the first and last PREVIEW_SCAN_BYTES.
+ * Extract preview information from a session file via full JSONL parse.
+ * Reads the entire file to guarantee all messages are considered regardless
+ * of position. Returns first N and last N user/assistant messages.
  * 
  * @param previewLines Number of messages to extract from head and tail (default: 2)
  */
@@ -228,34 +226,35 @@ export function extractSessionPreview(filePath: string, previewLines: number = 2
   };
 
   try {
-    const stat = statSync(filePath);
-    const size = stat.size;
-    if (size === 0) return preview;
+    const content = readFileSync(filePath, "utf-8");
+    const allMessages: PreviewMessage[] = [];
 
-    // Scan head for first messages, gitBranch, cwd
-    const headSize = Math.min(size, PREVIEW_SCAN_BYTES);
-    const headBuf = Buffer.alloc(headSize);
-    const fd = openSync(filePath, "r");
-    readSync(fd, headBuf, 0, headSize, 0);
+    let pos = 0;
+    const len = content.length;
 
-    const headText = headBuf.toString("utf-8");
-    const headLines = headText.split("\n");
+    while (pos < len) {
+      let end = content.indexOf("\n", pos);
+      if (end === -1) end = len;
+      const line = content.substring(pos, end);
+      pos = end + 1;
 
-    for (const line of headLines) {
       if (!line.trim()) continue;
       try {
         const entry = JSON.parse(line);
+
+        // Metadata: grab first gitBranch and cwd
         if (!preview.gitBranch && entry.gitBranch) {
           preview.gitBranch = entry.gitBranch;
         }
         if (!preview.cwd && entry.cwd) {
           preview.cwd = entry.cwd;
         }
-        if (preview.headMessages.length < previewLines &&
-            (entry.type === "user" || entry.type === "assistant")) {
+
+        // Collect user/assistant messages with text content
+        if (entry.type === "user" || entry.type === "assistant") {
           const text = extractMessageText(entry);
           if (text) {
-            preview.headMessages.push({
+            allMessages.push({
               role: entry.type as "user" | "assistant",
               text: text.slice(0, 200),
             });
@@ -264,41 +263,14 @@ export function extractSessionPreview(filePath: string, previewLines: number = 2
       } catch {}
     }
 
-    // Scan tail for last messages
-    const tailSize = Math.min(size, PREVIEW_SCAN_BYTES);
-    const tailOffset = Math.max(0, size - tailSize);
-    const tailBuf = Buffer.alloc(tailSize);
-    readSync(fd, tailBuf, 0, tailSize, tailOffset);
-    closeSync(fd);
+    // Take first N and last N
+    preview.headMessages = allMessages.slice(0, previewLines);
+    const tailStart = Math.max(previewLines, allMessages.length - previewLines);
+    preview.tailMessages = allMessages.slice(tailStart);
 
-    const tailText = tailBuf.toString("utf-8");
-    const tailLines = tailText.split("\n").reverse();
-
-    for (const line of tailLines) {
-      if (!line.trim()) continue;
-      try {
-        const entry = JSON.parse(line);
-        if (preview.tailMessages.length < previewLines &&
-            (entry.type === "user" || entry.type === "assistant")) {
-          const text = extractMessageText(entry);
-          if (text) {
-            preview.tailMessages.unshift({
-              role: entry.type as "user" | "assistant",
-              text: text.slice(0, 200),
-            });
-          }
-        }
-        if (preview.tailMessages.length >= previewLines) break;
-      } catch {}
-    }
-
-    // Deduplicate: if session is short, head and tail may overlap
-    if (preview.headMessages.length > 0 && preview.tailMessages.length > 0) {
-      const headLast = preview.headMessages[preview.headMessages.length - 1];
-      const tailFirst = preview.tailMessages[0];
-      if (headLast.text === tailFirst.text && headLast.role === tailFirst.role) {
-        preview.tailMessages = [];
-      }
+    // If head and tail overlap (short session), clear tail to avoid duplication
+    if (allMessages.length <= previewLines * 2) {
+      preview.tailMessages = [];
     }
   } catch {}
 

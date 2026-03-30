@@ -28,7 +28,7 @@ import { querySingleWindow, queryBatch, querySelf, queryAncestors, querySubagent
 // ============================================================================
 
 const server = new Server(
-  { name: "duncan-cc", version: "0.4.0" },
+  { name: "duncan-cc", version: "0.5.0" },
   { capabilities: { tools: {} } },
 );
 

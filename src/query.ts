@@ -103,7 +103,7 @@ function oauthClientConfig(token: string): ResolvedAuth {
       "accept": "application/json",
       "anthropic-dangerous-direct-browser-access": "true",
       "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
-      "user-agent": "duncan-cc/0.4.0",
+      "user-agent": "duncan-cc/0.5.0",
       "x-app": "cli",
     },
   };
@@ -366,6 +366,8 @@ export async function queryBatch(
   const queryId = randomUUID();
   const resolved = resolveSessionFiles(routing);
 
+  const emptyUsage: DuncanUsageStats = { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+
   if (resolved.sessions.length === 0) {
     return {
       queryId,
@@ -374,6 +376,7 @@ export async function queryBatch(
       totalWindows: 0,
       hasMore: false,
       offset: routing.offset ?? 0,
+      usage: emptyUsage,
     };
   }
 
@@ -516,14 +519,14 @@ export async function querySelf(
   const callingSessionId = findCallingSession(opts.toolUseId, allSessions);
   if (!callingSessionId) {
     return {
-      queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }: 0, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+      queryId, question, results: [], totalWindows: 0, hasMore: false, offset: 0, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
     };
   }
 
   const session = allSessions.find(s => s.sessionId === callingSessionId);
   if (!session) {
     return {
-      queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }: 0, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+      queryId, question, results: [], totalWindows: 0, hasMore: false, offset: 0, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
     };
   }
 
@@ -531,13 +534,13 @@ export async function querySelf(
   const windows = processSessionWindows(session.path);
   if (windows.length === 0) {
     return {
-      queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }: 0, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+      queryId, question, results: [], totalWindows: 0, hasMore: false, offset: 0, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
     };
   }
   const activeWindow = windows[windows.length - 1];
   if (activeWindow.messages.length === 0) {
     return {
-      queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }: 0, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+      queryId, question, results: [], totalWindows: 0, hasMore: false, offset: 0, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
     };
   }
 

@@ -148,27 +148,48 @@ If you can say it in one sentence, don't use three. Prefer short, direct sentenc
 // ============================================================================
 
 /** Environment info section */
+/**
+ * Knowledge cutoff date by model family — matches CC's LM7().
+ */
+function knowledgeCutoff(modelId?: string): string | null {
+  if (!modelId) return null;
+  const id = modelId.toLowerCase();
+  if (id.includes("claude-sonnet-4-6")) return "August 2025";
+  if (id.includes("claude-opus-4-6")) return "May 2025";
+  if (id.includes("claude-opus-4-5")) return "May 2025";
+  if (id.includes("claude-haiku-4")) return "February 2025";
+  if (id.includes("claude-opus-4") || id.includes("claude-sonnet-4")) return "January 2025";
+  if (id.includes("claude-3-5-sonnet") || id.includes("claude-3-5-haiku")) return "April 2024";
+  return null;
+}
+
 function sectionEnvironment(opts: {
   cwd: string;
   isGitRepo: boolean;
   modelId?: string;
   additionalDirs?: string[];
 }): string {
-  const modelLine = opts.modelId
-    ? `You are powered by the model ${opts.modelId}.`
+  const modelId = opts.modelId;
+  const modelLine = modelId
+    ? `You are powered by the model ${modelId}.`
     : "";
   const additionalDirs = opts.additionalDirs?.length
     ? `Additional working directories: ${opts.additionalDirs.join(", ")}\n`
     : "";
+  const shell = process.env.SHELL || "unknown";
+  const shellName = shell.includes("zsh") ? "zsh" : shell.includes("bash") ? "bash" : shell;
+  const cutoff = knowledgeCutoff(modelId);
+  const cutoffLine = cutoff ? `\nAssistant knowledge cutoff is ${cutoff}.` : "";
 
   return `Here is useful information about the environment you are running in:
 <env>
 Working directory: ${opts.cwd}
 Is directory a git repo: ${opts.isGitRepo ? "Yes" : "No"}
 ${additionalDirs}Platform: ${platform()}
+Shell: ${shellName}
 OS Version: ${release()}
 </env>
-${modelLine}`;
+${modelLine}${cutoffLine}`;
 }
 
 // ============================================================================
@@ -248,16 +269,72 @@ function formatClaudeMd(sources: ClaudeMdSource[]): string | null {
 // Memory loading — from CC project dir
 // ============================================================================
 
-function loadMemory(projectDir: string | null): string | null {
+/** Max lines of MEMORY.md to include before truncation warning. Matches CC's RF = 200. */
+const MEMORY_MAX_LINES = 200;
+
+/**
+ * Build the memory section — CC's sVq() / va5() extract-mode path.
+ * Includes instructions for how memory works (types, when to access, verification)
+ * plus the MEMORY.md content from the project dir.
+ * 
+ * For duncan (read-only queries), we use the extract/read-mode instructions —
+ * the model doesn't need to write memories, just understand what they mean.
+ */
+function buildMemorySection(projectDir: string | null): string | null {
   if (!projectDir) return null;
   const memoryDir = join(projectDir, "memory");
   const memoryFile = join(memoryDir, "MEMORY.md");
+
+  // Build instruction preamble
+  const sections: string[] = [
+    `# auto memory`,
+    "",
+    `You have a persistent, file-based memory system at \`${memoryDir}\`.`,
+    "",
+    `\`MEMORY.md\` is an index of memory files, loaded into your conversation context (first ${MEMORY_MAX_LINES} lines). Use it to find relevant notes from prior sessions.`,
+    "",
+    "A background agent automatically extracts and saves memories from this conversation. If the user asks you to remember or forget something, acknowledge it — the save happens automatically. You should not write to memory files yourself.",
+    "",
+    "## When to access memories",
+    "- When memories seem relevant, or the user references prior-conversation work.",
+    "- You MUST access memory when the user explicitly asks you to check, recall, or remember.",
+    "- If the user says to *ignore* or *not use* memory: proceed as if MEMORY.md were empty. Do not apply remembered facts, cite, compare against, or mention memory content.",
+    "",
+    "## Before recommending from memory",
+    "",
+    "A memory that names a specific function, file, or flag is a claim that it existed *when the memory was written*. It may have been renamed, removed, or never merged. Before recommending it:",
+    "",
+    "- If the memory names a file path: check the file exists.",
+    "- If the memory names a function or flag: grep for it.",
+    "- If the user is about to act on your recommendation (not just asking about history), verify first.",
+    "",
+    '"The memory says X exists" is not the same as "X exists now."',
+    "",
+    "A memory that summarizes repo state (activity logs, architecture snapshots) is frozen in time. If the user asks about *recent* or *current* state, prefer `git log` or reading the code over recalling the snapshot.",
+  ];
+
+  // Load MEMORY.md content
   try {
-    if (!existsSync(memoryFile)) return null;
-    return readFileSync(memoryFile, "utf-8").trim() || null;
+    if (existsSync(memoryFile)) {
+      const content = readFileSync(memoryFile, "utf-8").trim();
+      if (content) {
+        const lines = content.split("\n");
+        const truncated = lines.length > MEMORY_MAX_LINES;
+        const displayContent = truncated
+          ? lines.slice(0, MEMORY_MAX_LINES).join("\n") + `\n\n... (truncated at ${MEMORY_MAX_LINES} lines, ${lines.length} total)`
+          : content;
+        sections.push("", "## MEMORY.md", "", displayContent);
+      } else {
+        sections.push("", "## MEMORY.md", "", "Your MEMORY.md is currently empty. When you save new memories, they will appear here.");
+      }
+    } else {
+      sections.push("", "## MEMORY.md", "", "Your MEMORY.md is currently empty. When you save new memories, they will appear here.");
+    }
   } catch {
-    return null;
+    // Can't read memory file — skip content section
   }
+
+  return sections.join("\n");
 }
 
 // ============================================================================
@@ -380,11 +457,8 @@ export function buildSystemPrompt(opts: SystemPromptOptions): string[] {
       modelId: opts.modelId,
     }),
 
-    // Dynamic: memory from project dir
-    opts.projectDir ? (() => {
-      const memory = loadMemory(opts.projectDir!);
-      return memory ? `# Memory\n${memory}` : null;
-    })() : null,
+    // Dynamic: memory from project dir (with instructions)
+    buildMemorySection(opts.projectDir ?? null),
 
     // Dynamic: language
     opts.language ? `# Language\nAlways respond in ${opts.language}. Use ${opts.language} for all explanations, comments, and communications with the user. Technical terms and code identifiers should remain in their original form.` : null,
