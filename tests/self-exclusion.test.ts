@@ -39,12 +39,18 @@ mkdirSync(TMPDIR, { recursive: true });
 // findCallingSession — PID-based resolution
 // ============================================================================
 
-console.log("\n--- findCallingSession: returns null outside CC ---");
+console.log("\n--- findCallingSession: works or returns null ---");
 {
-  // No ~/.claude/sessions/<pid>.json exists for our process tree
+  // If running under CC, findCallingSession will find the real session.
+  // If running standalone (CI, etc.), it returns null.
   const result = findCallingSession();
-  assert(result === null, `returns null: ${JSON.stringify(result)}`);
-  ok("returns null gracefully when no session registry exists");
+  if (result) {
+    assert(typeof result.sessionId === "string" && result.sessionId.length > 0, `valid sessionId: ${result.sessionId}`);
+    ok("found calling session via PID walk (running under CC)");
+  } else {
+    assert(result === null, `returns null: ${JSON.stringify(result)}`);
+    ok("returns null gracefully (not running under CC)");
+  }
 }
 
 console.log("\n--- findCallingSession: reads synthetic session registry ---");

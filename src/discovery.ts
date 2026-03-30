@@ -12,6 +12,7 @@
 import { readdirSync, statSync, existsSync, openSync, readSync, closeSync, readFileSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { homedir } from "node:os";
+import { execSync } from "node:child_process";
 
 // ============================================================================
 // Path resolution — mirrors CC's path layout
@@ -590,7 +591,6 @@ export function findCallingSession(): { sessionId: string; cwd: string } | null 
 function getParentPid(pid: number): number | null {
   try {
     if (pid === process.pid) return process.ppid;
-    const { execSync } = require("node:child_process");
     const result = (execSync(`ps -o ppid= -p ${pid}`, {
       encoding: "utf-8",
       timeout: 1000,
