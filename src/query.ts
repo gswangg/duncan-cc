@@ -270,8 +270,8 @@ export async function querySingleWindow(
       return { ...parsed, usage: response.usage as any, latencyMs };
     }
 
-    // Malformed input — retry once with correction prompt
-    const retryMessages = [
+    // Malformed input — retry up to 3 times with correction prompt
+    let retryMessages: Anthropic.MessageParam[] = [
       ...fixedMessages,
       { role: "assistant" as const, content: response.content },
       {
@@ -279,28 +279,40 @@ export async function querySingleWindow(
         content: "Your duncan_response tool call had invalid input. Call it again with { hasContext: boolean, answer: string }.",
       },
     ];
-    const retryStream = client.messages.stream({
-      model,
-      system: systemBlocks.length > 0 ? systemBlocks : undefined,
-      messages: retryMessages,
-      tools: [DUNCAN_RESPONSE_TOOL],
-      tool_choice: { type: "tool" as const, name: "duncan_response" },
-      max_tokens: 65536,
-    });
-    const retryResponse = await retryStream.finalMessage();
-    const retryCall = retryResponse.content.find(
-      (c): c is Anthropic.ToolUseBlock => c.type === "tool_use" && c.name === "duncan_response",
-    );
-    if (retryCall) {
-      const retryParsed = coerceDuncanResponse(retryCall.input as Record<string, unknown>);
-      if (retryParsed) {
-        const latencyMs = Date.now() - startTime;
-        return { ...retryParsed, usage: retryResponse.usage as any, latencyMs };
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const retryStream = client.messages.stream({
+        model,
+        system: systemBlocks.length > 0 ? systemBlocks : undefined,
+        messages: retryMessages,
+        tools: [DUNCAN_RESPONSE_TOOL],
+        tool_choice: { type: "tool" as const, name: "duncan_response" },
+        max_tokens: 65536,
+      });
+      const retryResponse = await retryStream.finalMessage();
+      const retryCall = retryResponse.content.find(
+        (c): c is Anthropic.ToolUseBlock => c.type === "tool_use" && c.name === "duncan_response",
+      );
+      if (retryCall) {
+        const retryParsed = coerceDuncanResponse(retryCall.input as Record<string, unknown>);
+        if (retryParsed) {
+          const latencyMs = Date.now() - startTime;
+          return { ...retryParsed, usage: retryResponse.usage as any, latencyMs };
+        }
       }
+      // Append failed attempt for next retry
+      retryMessages = [
+        ...retryMessages,
+        { role: "assistant" as const, content: retryResponse.content },
+        {
+          role: "user" as const,
+          content: "Still invalid. Call duncan_response with { hasContext: boolean, answer: string }.",
+        },
+      ];
     }
   }
 
-  throw new Error("Duncan query failed: model did not produce a valid duncan_response tool call despite tool_choice constraint");
+  throw new Error("Duncan query failed: model did not produce a valid duncan_response tool call after 3 retries");
 }
 
 // ============================================================================
