@@ -103,7 +103,7 @@ function oauthClientConfig(token: string): ResolvedAuth {
       "accept": "application/json",
       "anthropic-dangerous-direct-browser-access": "true",
       "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
-      "user-agent": "duncan-cc/0.5.0",
+      "user-agent": "duncan-cc/0.6.0",
       "x-app": "cli",
     },
   };
@@ -253,7 +253,7 @@ export async function querySingleWindow(
     messages: fixedMessages,
     tools: [DUNCAN_RESPONSE_TOOL],
     tool_choice: { type: "tool" as const, name: "duncan_response" },
-    max_tokens: 65536,
+    max_tokens: 64000,
   });
   const response = await stream.finalMessage();
 
@@ -287,7 +287,7 @@ export async function querySingleWindow(
         messages: retryMessages,
         tools: [DUNCAN_RESPONSE_TOOL],
         tool_choice: { type: "tool" as const, name: "duncan_response" },
-        max_tokens: 65536,
+        max_tokens: 64000,
       });
       const retryResponse = await retryStream.finalMessage();
       const retryCall = retryResponse.content.find(
@@ -380,11 +380,10 @@ export async function queryBatch(
     };
   }
 
-  // Find the calling session for self-exclusion (window-level, not session-level).
-  // For the calling session: keep compaction windows, drop only the active (last) window.
-  // For all other sessions: include all windows.
-  const callingSessionId = routing.toolUseId
-    ? findCallingSession(routing.toolUseId, resolved.sessions)
+  // Self-exclusion (window-level): keep compaction windows of calling session,
+  // only drop the active window. Skip for session mode (explicit target).
+  const callingSessionId = routing.mode !== "session"
+    ? (findCallingSession()?.sessionId ?? null)
     : null;
 
   // Process each session into windows
@@ -497,12 +496,11 @@ export async function queryBatch(
  * 1. Wave 1: Send 1 query to prime the cache (pays full input cost)
  * 2. Wave 2: Send remaining N-1 queries in batches (hit cached prefix)
  *
- * The active session is identified by toolUseId (from MCP _meta).
+ * The active session is identified via CC's PID-based session registry.
  */
 export async function querySelf(
   question: string,
   opts: {
-    toolUseId: string;
     copies?: number;
     batchSize?: number;
     apiKey?: string;
@@ -514,9 +512,9 @@ export async function querySelf(
   const queryId = randomUUID();
   const copies = opts.copies ?? 3;
 
-  // Find the calling session by toolUseId
-  const allSessions = listAllSessionFiles();
-  const callingSessionId = findCallingSession(opts.toolUseId, allSessions);
+  // Find the calling session via PID-based registry
+  const calling = findCallingSession();
+  const callingSessionId = calling?.sessionId ?? null;
   if (!callingSessionId) {
     return {
       queryId, question, results: [], totalWindows: 0, hasMore: false, offset: 0, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
@@ -620,7 +618,6 @@ export async function querySelf(
 export async function queryAncestors(
   question: string,
   opts: {
-    toolUseId: string;
     limit?: number;
     offset?: number;
     batchSize?: number;
@@ -634,9 +631,9 @@ export async function queryAncestors(
   const limit = opts.limit ?? 50;
   const offset = opts.offset ?? 0;
 
-  // Find the calling session
-  const allSessions = listAllSessionFiles();
-  const callingSessionId = findCallingSession(opts.toolUseId, allSessions);
+  // Find the calling session via PID-based registry
+  const calling = findCallingSession();
+  const callingSessionId = calling?.sessionId ?? null;
   if (!callingSessionId) {
     return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };
   }
@@ -725,7 +722,6 @@ export async function queryAncestors(
 export async function querySubagents(
   question: string,
   opts: {
-    toolUseId: string;
     limit?: number;
     offset?: number;
     batchSize?: number;
@@ -739,12 +735,14 @@ export async function querySubagents(
   const limit = opts.limit ?? 50;
   const offset = opts.offset ?? 0;
 
-  const allSessions = listAllSessionFiles();
-  const callingSessionId = findCallingSession(opts.toolUseId, allSessions);
+  // Find the calling session via PID-based registry
+  const calling = findCallingSession();
+  const callingSessionId = calling?.sessionId ?? null;
   if (!callingSessionId) {
     return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };
   }
 
+  const allSessions = listAllSessionFiles();
   const session = allSessions.find(s => s.sessionId === callingSessionId);
   if (!session) {
     return { queryId, question, results: [], totalWindows: 0, hasMore: false, offset, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } };

@@ -28,7 +28,7 @@ import { querySingleWindow, queryBatch, querySelf, queryAncestors, querySubagent
 // ============================================================================
 
 const server = new Server(
-  { name: "duncan-cc", version: "0.5.0" },
+  { name: "duncan-cc", version: "0.6.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -177,14 +177,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args, _meta } = request.params;
 
-  // CC passes tool_use ID in _meta — used for self-exclusion
   const meta = _meta as Record<string, unknown> | undefined;
-  const toolUseId = meta?.["claudecode/toolUseId"] as string | undefined;
   const progressToken = meta?.progressToken as string | number | undefined;
 
   switch (name) {
     case "duncan_query":
-      return handleDuncanQuery(args as any, toolUseId, progressToken);
+      return handleDuncanQuery(args as any, progressToken);
     case "duncan_projects":
       return handleListProjects(args as any);
     case "duncan_list_sessions":
@@ -235,18 +233,11 @@ async function handleDuncanQuery(args: {
   copies?: number;
   batchSize?: number;
   gitBranch?: string;
-}, toolUseId?: string, progressToken?: string | number) {
+}, progressToken?: string | number) {
   try {
     // Self mode: query own active window N times for sampling diversity
     if (args.mode === "self") {
-      if (!toolUseId) {
-        return {
-          content: [{ type: "text", text: "Self mode requires toolUseId from _meta (only available when called from CC)." }],
-          isError: true,
-        };
-      }
       const result = await querySelf(args.question, {
-        toolUseId,
         copies: args.copies ?? 3,
         batchSize: args.batchSize,
         apiKey: undefined,
@@ -273,14 +264,7 @@ async function handleDuncanQuery(args: {
 
     // Ancestors mode: query prior compaction windows of the calling session
     if (args.mode === "ancestors") {
-      if (!toolUseId) {
-        return {
-          content: [{ type: "text", text: "Ancestors mode requires toolUseId from _meta (only available when called from CC)." }],
-          isError: true,
-        };
-      }
       const result = await queryAncestors(args.question, {
-        toolUseId,
         limit: args.limit ?? 50,
         offset: args.offset ?? 0,
         batchSize: args.batchSize,
@@ -318,14 +302,7 @@ async function handleDuncanQuery(args: {
 
     // Subagents mode: query subagent transcripts of the calling session
     if (args.mode === "subagents") {
-      if (!toolUseId) {
-        return {
-          content: [{ type: "text", text: "Subagents mode requires toolUseId from _meta (only available when called from CC)." }],
-          isError: true,
-        };
-      }
       const result = await querySubagents(args.question, {
-        toolUseId,
         limit: args.limit ?? 50,
         offset: args.offset ?? 0,
         batchSize: args.batchSize,
@@ -378,7 +355,6 @@ async function handleDuncanQuery(args: {
         limit: args.limit ?? 10,
         offset: args.offset ?? 0,
         includeSubagents: args.includeSubagents ?? false,
-        toolUseId, // for self-exclusion + branch detection
         gitBranch: args.gitBranch,
       },
       {

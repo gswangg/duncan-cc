@@ -438,8 +438,6 @@ export interface RoutingParams {
   offset?: number;
   /** For "branch" mode: explicit git branch (auto-detected from calling session if omitted) */
   gitBranch?: string;
-  /** Tool use ID from MCP _meta (used for self-exclusion and branch detection) */
-  toolUseId?: string;
 }
 
 export interface RoutingResult {
@@ -503,7 +501,6 @@ export function resolveSessionFiles(params: RoutingParams): RoutingResult {
 
     case "branch": {
       // Find all sessions in the same project that share a git branch with the current session.
-      // Requires toolUseId to identify the calling session, or an explicit gitBranch param.
       const projectDir = params.projectDir ?? (params.cwd ? getProjectDir(params.cwd) : null);
       if (!projectDir) {
         return { sessions: [], totalCount: 0, hasMore: false };
@@ -512,14 +509,12 @@ export function resolveSessionFiles(params: RoutingParams): RoutingResult {
       const projectSessions = listSessionFiles(projectDir);
       let targetBranch: string | null = null;
 
-      // If we have a toolUseId, find the calling session's branch
-      if (params.toolUseId) {
-        const callingId = findCallingSession(params.toolUseId, projectSessions);
-        if (callingId) {
-          const callingSession = projectSessions.find(s => s.sessionId === callingId);
-          if (callingSession) {
-            targetBranch = extractGitBranch(callingSession.path);
-          }
+      // Resolve calling session's branch via PID-based lookup
+      const calling = findCallingSession();
+      if (calling) {
+        const callingSession = projectSessions.find(s => s.sessionId === calling.sessionId);
+        if (callingSession) {
+          targetBranch = extractGitBranch(callingSession.path);
         }
       }
 
@@ -552,70 +547,60 @@ export function resolveSessionFiles(params: RoutingParams): RoutingResult {
 }
 
 // ============================================================================
-// Self-exclusion — find the calling session by toolUseId
+// Calling session resolution — PID-based via CC's session registry
 // ============================================================================
 
-/** Size of tail chunk to scan for toolUseId (bytes). */
-const TAIL_SCAN_BYTES = 32_768;
-
 /**
- * Scan the tail of a JSONL file for a tool_use ID string.
- * Returns true if found. Only reads the last TAIL_SCAN_BYTES of the file
- * to keep I/O minimal — the tool_use that triggered the MCP call will be
- * near the very end of the active session file.
+ * Resolve the calling session via CC's session registry.
+ *
+ * CC writes `~/.claude/sessions/<pid>.json` for each active session,
+ * containing `{ pid, sessionId, cwd, startedAt, kind }`. The file exists
+ * for the lifetime of the CC process and is deleted on exit.
+ *
+ * Since the MCP server is a child (or grandchild) of the CC process,
+ * we walk up the process tree from our PID until we find one that matches
+ * a session registry file. This is deterministic and race-free — unlike
+ * toolUseId tail-scanning, which depends on write ordering.
+ *
+ * @returns `{ sessionId, cwd }` or `null` if no matching session found
  */
-function tailContains(filePath: string, needle: string): boolean {
-  let fd: number | undefined;
-  try {
-    const stat = statSync(filePath);
-    const size = stat.size;
-    if (size === 0) return false;
+export function findCallingSession(): { sessionId: string; cwd: string } | null {
+  const sessionsDir = join(homedir(), ".claude", "sessions");
+  if (!existsSync(sessionsDir)) return null;
 
-    const readSize = Math.min(size, TAIL_SCAN_BYTES);
-    const offset = size - readSize;
-    const buf = Buffer.alloc(readSize);
-
-    fd = openSync(filePath, "r");
-    readSync(fd, buf, 0, readSize, offset);
-    closeSync(fd);
-    fd = undefined;
-
-    return buf.includes(needle);
-  } catch {
-    return false;
-  } finally {
-    if (fd !== undefined) {
-      try { closeSync(fd); } catch {}
+  let pid = process.pid;
+  while (pid > 1) {
+    const sessionFile = join(sessionsDir, `${pid}.json`);
+    if (existsSync(sessionFile)) {
+      try {
+        const info = JSON.parse(readFileSync(sessionFile, "utf-8"));
+        if (info.sessionId) {
+          return { sessionId: info.sessionId, cwd: info.cwd ?? process.cwd() };
+        }
+      } catch {}
     }
+    const ppid = getParentPid(pid);
+    if (!ppid || ppid === pid) break;
+    pid = ppid;
   }
+  return null;
 }
 
-/**
- * Find the session that contains a specific tool_use ID.
- * 
- * When CC calls an MCP tool, it writes the assistant message (containing
- * the tool_use block) to the session JSONL *before* invoking the tool.
- * CC passes the tool_use ID in the MCP request's `_meta` field as
- * `"claudecode/toolUseId"`. We scan the tail of candidate session files
- * to find the one containing that ID — that's the calling session.
- * 
- * @param toolUseId  The tool_use ID from MCP request `_meta`
- * @param candidates Session files to search (pre-filtered by routing mode)
- * @returns The matching session's ID, or null if not found
- */
-export function findCallingSession(
-  toolUseId: string,
-  candidates: SessionFileInfo[],
-): string | null {
-  if (!toolUseId) return null;
-
-  for (const session of candidates) {
-    if (tailContains(session.path, toolUseId)) {
-      return session.sessionId;
-    }
+/** Get parent PID. Uses process.ppid for self, `ps` for other processes. */
+function getParentPid(pid: number): number | null {
+  try {
+    if (pid === process.pid) return process.ppid;
+    const { execSync } = require("node:child_process");
+    const result = (execSync(`ps -o ppid= -p ${pid}`, {
+      encoding: "utf-8",
+      timeout: 1000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }) as string).trim();
+    const ppid = parseInt(result, 10);
+    return Number.isFinite(ppid) ? ppid : null;
+  } catch {
+    return null;
   }
-
-  return null;
 }
 
 
