@@ -20,7 +20,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { processSessionFile, processSessionWindows } from "./pipeline.js";
-import { resolveSessionFiles, getProjectsDir, listAllSessionFiles, listProjects, extractGitBranch, extractSessionPreview, cwdToProjectDirName } from "./discovery.js";
+import { resolveSessionFiles, getProjectsDir, listAllSessionFiles, listProjects, extractGitBranch, extractSessionPreview, cwdToProjectDirName, findCallingSession } from "./discovery.js";
 import { querySingleWindow, queryBatch, querySelf, queryAncestors, querySubagents } from "./query.js";
 
 // ============================================================================
@@ -351,7 +351,7 @@ async function handleDuncanQuery(args: {
         mode: args.mode as any,
         projectDir: args.projectDir,
         sessionId: args.sessionId,
-        cwd: args.cwd,
+        cwd: args.cwd ?? findCallingSession()?.cwd,
         limit: args.limit ?? 10,
         offset: args.offset ?? 0,
         includeSubagents: args.includeSubagents ?? false,
