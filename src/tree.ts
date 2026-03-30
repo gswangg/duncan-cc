@@ -357,6 +357,10 @@ export function getCompactionWindows(chain: CCMessage[]): CompactionWindow[] {
 /**
  * Full pipeline: parse → relink → find leaf → walk → return chain.
  * Returns the raw chain (before normalization).
+ *
+ * Note: relinkPreservedSegments deletes pre-boundary messages from the map,
+ * so this only returns the active chain (post-last-boundary). For the full
+ * chain across all compaction windows, use buildFullChain instead.
  */
 export function buildRawChain(parsed: ParsedSession): CCMessage[] {
   // Step 1: Relink preserved segments (mutates the map)
@@ -368,4 +372,66 @@ export function buildRawChain(parsed: ParsedSession): CCMessage[] {
 
   // Step 3: Walk the chain
   return walkChain(parsed.messages, leaf);
+}
+
+/**
+ * Build the full chain across all compaction boundaries.
+ *
+ * After compaction, compact_boundary entries have parentUuid=null, creating
+ * disconnected subtrees. buildRawChain only walks from the latest leaf and
+ * stops at the first null parentUuid — missing all pre-compaction messages.
+ *
+ * This function reconstructs the complete chain by:
+ * 1. Snapshotting entries in JSONL (insertion) order before any mutations
+ * 2. Splitting at compact_boundary entries
+ * 3. Walking each subtree independently from its best leaf
+ * 4. Concatenating with boundaries between segments
+ *
+ * The result can be passed to getCompactionWindows to split into independently
+ * queryable windows.
+ */
+export function buildFullChain(parsed: ParsedSession): CCMessage[] {
+  // Snapshot in JSONL order before any destructive operations
+  const allEntries = [...parsed.messages.values()];
+
+  const boundaryIndices: number[] = [];
+  for (let i = 0; i < allEntries.length; i++) {
+    if (isCompactBoundary(allEntries[i])) {
+      boundaryIndices.push(i);
+    }
+  }
+
+  // No boundaries — fall back to standard pipeline
+  if (boundaryIndices.length === 0) {
+    return buildRawChain(parsed);
+  }
+
+  const result: CCMessage[] = [];
+
+  // Pre-first-boundary segment: the original conversation before any compaction
+  const firstBIdx = boundaryIndices[0];
+  if (firstBIdx > 0) {
+    const segEntries = allEntries.slice(0, firstBIdx);
+    const subMap = new Map(segEntries.map(e => [e.uuid, e]));
+    const leaf = findBestLeaf(subMap);
+    if (leaf) result.push(...walkChain(subMap, leaf));
+  }
+
+  // Each boundary + its following segment
+  for (let k = 0; k < boundaryIndices.length; k++) {
+    const bIdx = boundaryIndices[k];
+    result.push(allEntries[bIdx]); // The compact_boundary entry itself
+
+    const segStart = bIdx + 1;
+    const segEnd = k + 1 < boundaryIndices.length ? boundaryIndices[k + 1] : allEntries.length;
+
+    if (segStart < segEnd) {
+      const segEntries = allEntries.slice(segStart, segEnd);
+      const subMap = new Map(segEntries.map(e => [e.uuid, e]));
+      const leaf = findBestLeaf(subMap);
+      if (leaf) result.push(...walkChain(subMap, leaf));
+    }
+  }
+
+  return result;
 }

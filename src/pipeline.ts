@@ -10,7 +10,7 @@
 
 import { readFileSync } from "node:fs";
 import { parseSession, type ParsedSession } from "./parser.js";
-import { buildRawChain, sliceFromBoundary, stripInternalFields, getCompactionWindows, type CompactionWindow } from "./tree.js";
+import { buildRawChain, buildFullChain, sliceFromBoundary, stripInternalFields, getCompactionWindows, type CompactionWindow } from "./tree.js";
 import { normalizeMessages } from "./normalize.js";
 import { applyContentReplacements, microcompact } from "./content-replacements.js";
 import { injectUserContext, buildSystemPromptString, buildSubagentSystemPrompt, extractToolNames, type SystemPromptOptions } from "./system-prompt.js";
@@ -68,6 +68,10 @@ export interface PipelineOptions {
   projectDir?: string | null;
   /** Agent type for subagent transcripts (from .meta.json) */
   agentType?: string | null;
+  /** Build the full chain across all compaction boundaries (default: false).
+   *  When true, reconstructs orphaned pre-compaction subtrees so that
+   *  getCompactionWindows returns ancestor windows. Required for ancestors mode. */
+  fullChain?: boolean;
 }
 
 // ============================================================================
@@ -207,7 +211,7 @@ export function processSessionWindows(
 ): WindowPipelineResult[] {
   const content = readFileSync(sessionFile, "utf-8");
   const parsed = parseSession(content);
-  const chain = buildRawChain(parsed);
+  const chain = opts.fullChain ? buildFullChain(parsed) : buildRawChain(parsed);
 
   if (chain.length === 0) return [];
 
