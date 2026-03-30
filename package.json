@@ -1,6 +1,6 @@
 {
   "name": "@gswangg/duncan-cc",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Query dormant Claude Code sessions — the Duncan Idaho approach to agent memory, for CC.",
   "type": "module",
   "bin": {
