@@ -1,10 +1,10 @@
 {
   "name": "@gswangg/duncan-cc",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "Query dormant Claude Code sessions — the Duncan Idaho approach to agent memory, for CC.",
   "type": "module",
   "bin": {
-    "duncan-cc": "./src/mcp-server.ts"
+    "duncan-cc": "./bin/duncan-cc.mjs"
   },
   "scripts": {
     "start": "npx tsx src/mcp-server.ts",
