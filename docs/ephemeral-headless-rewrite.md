@@ -75,6 +75,22 @@ Assessment:
 - That makes it a mismatch for the rewrite goal: use real headless Claude Code with its normal auth/session machinery instead of replacing it with another custom auth path.
 - Keep `--bare` only as a possible lab/debug curiosity if we ever want a hermetic API-key benchmark, but it should be treated as **out of scope for the actual rewrite path**.
 
+### 1c. Why session-id rewriting remains optional instead of default
+
+Findings from the staging spike:
+- default transcript mutation was the first thing that broke exact raw-window preservation tests
+- preserving raw JSONL entries is the safest default if the goal is "resume what Claude already wrote"
+- the staged file path and staged directory layout already give us isolation, even when the transcript's internal session id stays unchanged
+
+Why keep the rewrite path at all:
+- as an escape hatch if Claude resume behavior later proves sensitive to session-id collisions when multiple staged copies coexist
+- for experiments that intentionally want a fresh synthetic identity, closer to Claude's own branch/fork behavior
+- for cases where staged sidecars/subagents/tool-results need to be forced under a fresh session namespace
+
+Recommendation:
+- default = preserve raw entries
+- optional rewrite = explicit experiment knob, not baseline behavior
+
 ### 2. Cross-directory resume from a raw JSONL path is explicitly supported
 
 Relevant source:
@@ -310,10 +326,20 @@ Tests/benchmarks should measure:
 - wall clock at configurable concurrency
 - average/median staging latency
 - average/median subprocess latency
+- process memory envelope at concurrency sweeps like `1`, `5`, `10`, `20`
+  - rss when available
+  - virtual size / vsize / vsz when available
+  - temp-disk usage across staged dirs
 
 This spike does **not** need real Claude model calls in CI. A fake runner is
 acceptable for deterministic resource tests, as long as the real runner contract
 is the same.
+
+Recommended benchmark shape:
+- run a concurrency sweep at `1`, `5`, `10`, and `20`
+- measure both controller-process memory and child-process memory where possible
+- on Linux, prefer `/proc/<pid>/status` or `ps` sampling for VmRSS / VmSize
+- treat virtual memory as useful but secondary; rss is the more important signal
 
 ---
 
@@ -417,10 +443,18 @@ Concrete findings:
 - compaction-window staging works best as exact raw-entry slicing from `compact_boundary` to the next boundary/end
 - a simple 20-target fanout harness is operationally cheap enough to keep iterating locally, with concurrency caps enforced in-process
 - a minimal `claude --print --resume <jsonl>` runner wrapper is straightforward; the remaining uncertainty is not invocation shape but fidelity of staged filesystem context
+- concurrency-sweep resource benchmark now exists for `1`, `5`, `10`, `20` concurrent child processes using real spawned processes plus staged temp files
+- observed Linux memory profile in the synthetic benchmark was roughly:
+  - `1` concurrent: ~48 MB peak aggregate RSS, ~500 MB peak aggregate virtual size
+  - `5` concurrent: ~233 MB peak aggregate RSS, ~2.5 GB peak aggregate virtual size
+  - `10` concurrent: ~463 MB peak aggregate RSS, ~5.0 GB peak aggregate virtual size
+  - `20` concurrent: ~0.8–0.86 GB peak aggregate RSS, ~9.0–10.0 GB peak aggregate virtual size
+- interpretation: virtual size balloons much faster than RSS in this Node-based synthetic harness, so RSS is the more useful capacity signal; the virtual numbers are still worth watching for address-space / mapping weirdness
 
 Latest validation on this branch:
 - full `npm test` suite: **passing**
 - headless spike tests: **passing**
+- concurrency-sweep memory benchmark: **passing**
 
 ## Current Recommendation
 
