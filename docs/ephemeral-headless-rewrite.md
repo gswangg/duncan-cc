@@ -130,6 +130,14 @@ Implication:
   - session-sidecar directories (`tool-results`, possibly `subagents`)
   - project-level files that influence prompt behavior (`CLAUDE.md`, memory)
 
+Current fidelity strategy on this branch:
+- always copy `tool-results/` for headless queries
+- copy `subagents/` when the source transcript itself is a subagent transcript
+- infer the root session id from transcript entries, not just the filename, so subagent transcripts stage against the correct parent session sidecars
+- prefer running Claude with the transcript's original `cwd` when that directory still exists, so normal `CLAUDE.md` auto-discovery and live project context resolution keep working
+- fall back to the staged temp project dir only when the original `cwd` is unavailable
+- memory/CLAUDE.md are therefore currently handled by **original-cwd execution**, not by copying those files into the stage dir
+
 ### 4. Compaction boundaries are real transcript boundaries, not just logical markers
 
 Relevant source:
@@ -229,6 +237,19 @@ Responsibilities:
 - preserve raw JSONL entries by default
 - optionally rewrite session ids only when explicitly requested
 - return staged paths + staging stats
+
+### 1a. `src/headless/staged-session-manager.ts`
+
+Responsibilities:
+- allocate isolated per-run stage roots under a shared temp parent
+- write a small stage manifest for observability/debugging
+- clean staged derivative session files on success/failure
+- best-effort garbage collect stale stage roots from earlier crashes/interrupted runs
+
+Current behavior:
+- headless query execution now stages through the manager instead of calling the stager directly
+- stage cleanup runs in a `finally` block after each headless Claude invocation
+- stale run roots older than the GC threshold are removed opportunistically before new stage creation
 
 Core types:
 - `StageRequest`
@@ -470,9 +491,8 @@ Operational note:
 Do **not** jump straight to deleting the old path.
 
 Next implementation sequence:
-1. keep the existing API backend intact
-2. add an explicit backend selector (`api` vs `headless`)
-3. wire single-window headless execution first
-4. propagate that backend through batch/self/ancestor query flows
-5. keep warning users that higher `batchSize` values in headless mode require materially more memory
-6. only consider full replacement after correctness and operating-cost confidence are both high
+1. keep the API backend only as a temporary fallback
+2. make `headless` the branch default
+3. propagate that backend through batch/self/ancestor/subagent query flows
+4. keep warning users that higher `batchSize` values in headless mode require materially more memory
+5. only consider deleting the API fallback after correctness and operating-cost confidence are both high

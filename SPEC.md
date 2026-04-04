@@ -8,12 +8,11 @@ MCP server (stdio transport) with three tools: `duncan_query`,
 `duncan_projects`, and `duncan_list_sessions`.
 
 The rewrite in progress adds a second execution backend:
-- `api` — current direct Anthropic API path
 - `headless` — staged transcript + real `claude --print --resume <jsonl>` path
+- `api` — prior direct Anthropic API path, kept only as a temporary fallback toggle on this branch
 
-Short-term goal: land the headless backend beside the current backend, prove it
-works well enough, then decide whether it should replace the reverse-engineered
-API/OAuth path.
+Branch default now points at the `headless` backend. The older API path remains
+available only as a fallback while the cutover is being hardened.
 
 ## Pipeline: Disk → API
 

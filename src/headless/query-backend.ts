@@ -1,11 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { parseJsonl } from "../parser.js";
 import { runClaudeHeadless, type HeadlessRunRequest, type HeadlessRunResult } from "./claude-runner.js";
 import { deriveSessionWindowsFromEntries, type SessionWindowBoundary } from "./session-boundaries.js";
-import { stageSession } from "./session-stager.js";
+import { resolveHeadlessExecutionCwd, resolveHeadlessSourceContext } from "./source-context.js";
+import { StagedSessionManager } from "./staged-session-manager.js";
 
 export type QueryBackend = "api" | "headless";
 
@@ -29,6 +30,10 @@ export interface HeadlessQueryOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+const defaultStageManager = new StagedSessionManager({
+  stageRootDir: join(tmpdir(), "duncan-cc-headless-stage"),
+});
+
 export const DUNCAN_HEADLESS_JSON_SCHEMA = {
   type: "object",
   properties: {
@@ -40,8 +45,8 @@ export const DUNCAN_HEADLESS_JSON_SCHEMA = {
 } as const;
 
 export function resolveQueryBackend(explicit?: string | null): QueryBackend {
-  const value = explicit ?? process.env.DUNCAN_CC_QUERY_BACKEND ?? "api";
-  return value === "headless" ? "headless" : "api";
+  const value = explicit ?? process.env.DUNCAN_CC_QUERY_BACKEND ?? "headless";
+  return value === "api" ? "api" : "headless";
 }
 
 export async function resolveHeadlessWindowBoundary(
@@ -97,13 +102,17 @@ export async function querySingleWindowHeadless(
   opts: HeadlessQueryOptions = {},
 ): Promise<HeadlessQueryResult> {
   const window = await resolveHeadlessWindowBoundary(sessionFile, windowIndex);
-  const stage = await stageSession({
+  const sourceContext = await resolveHeadlessSourceContext(sessionFile);
+  const stageManager = opts.stageRootDir
+    ? new StagedSessionManager({ stageRootDir: opts.stageRootDir })
+    : defaultStageManager;
+  const staged = await stageManager.createStage({
     sourceSessionFile: sessionFile,
-    sourceProjectDir: dirname(sessionFile),
-    stageRootDir: opts.stageRootDir ?? join(tmpdir(), "duncan-cc-headless-stage"),
+    sourceProjectDir: sourceContext.sourceProjectDir,
+    sourceSessionId: sourceContext.sourceSessionId,
     window,
-    copyToolResults: false,
-    copySubagents: false,
+    copyToolResults: sourceContext.shouldCopyToolResults,
+    copySubagents: sourceContext.shouldCopySubagents,
   });
 
   const extraArgs: string[] = [
@@ -120,8 +129,8 @@ export async function querySingleWindowHeadless(
   }
 
   const runRequest: HeadlessRunRequest = {
-    cwd: stage.stageProjectDir,
-    resume: stage.stagedSessionFile,
+    cwd: await resolveHeadlessExecutionCwd(sourceContext.originalCwd, staged.stage.stageProjectDir),
+    resume: staged.stage.stagedSessionFile,
     prompt: buildHeadlessQuestionPrompt(question),
     outputFormat: "json",
     timeoutMs: opts.timeoutMs ?? 180000,
@@ -130,10 +139,13 @@ export async function querySingleWindowHeadless(
     extraArgs,
   };
 
-  const run = await runClaudeHeadless(runRequest);
-  if (!run.ok) {
-    throw new Error(run.stderr || run.stdout || `Headless Claude run failed with exit code ${run.exitCode}`);
+  try {
+    const run = await runClaudeHeadless(runRequest);
+    if (!run.ok) {
+      throw new Error(run.stderr || run.stdout || `Headless Claude run failed with exit code ${run.exitCode}`);
+    }
+    return parseHeadlessStructuredResult(run);
+  } finally {
+    await staged.cleanup();
   }
-
-  return parseHeadlessStructuredResult(run);
 }

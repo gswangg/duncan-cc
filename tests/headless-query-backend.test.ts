@@ -11,13 +11,13 @@ import {
   resolveQueryBackend,
 } from "../src/headless/query-backend.js";
 
-assert.equal(resolveQueryBackend(undefined), "api");
-process.env.DUNCAN_CC_QUERY_BACKEND = "headless";
 assert.equal(resolveQueryBackend(undefined), "headless");
+process.env.DUNCAN_CC_QUERY_BACKEND = "api";
+assert.equal(resolveQueryBackend(undefined), "api");
 delete process.env.DUNCAN_CC_QUERY_BACKEND;
 assert.equal(resolveQueryBackend("headless"), "headless");
 assert.equal(resolveQueryBackend("api"), "api");
-assert.equal(resolveQueryBackend("weird"), "api");
+assert.equal(resolveQueryBackend("weird"), "headless");
 
 assert.match(buildHeadlessQuestionPrompt("where was the bug?"), /where was the bug\?/);
 assert.deepEqual(DUNCAN_HEADLESS_JSON_SCHEMA.required, ["hasContext", "answer"]);
