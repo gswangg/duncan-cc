@@ -15,7 +15,8 @@
     "test:system": "npx tsx tests/system-prompt.test.ts",
     "test:pipeline": "npx tsx tests/pipeline.test.ts",
     "test:discovery": "npx tsx tests/discovery.test.ts",
-    "test:self-exclusion": "npx tsx tests/self-exclusion.test.ts"
+    "test:self-exclusion": "npx tsx tests/self-exclusion.test.ts",
+    "bench:real-claude-fanout": "npx tsx benches/headless-fanout-real-claude.bench.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",

@@ -9,10 +9,12 @@ export interface HeadlessRunRequest {
   extraArgs?: string[];
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
+  onSpawn?: (pid: number) => void;
 }
 
 export interface HeadlessRunResult {
   ok: boolean;
+  pid?: number;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   stdout: string;
@@ -48,6 +50,9 @@ export async function runClaudeHeadless(request: HeadlessRunRequest): Promise<He
       env: { ...process.env, ...(request.env ?? {}) },
       stdio: ["ignore", "pipe", "pipe"],
     });
+    if (child.pid) {
+      request.onSpawn?.(child.pid);
+    }
 
     let stdout = "";
     let stderr = "";
@@ -76,6 +81,7 @@ export async function runClaudeHeadless(request: HeadlessRunRequest): Promise<He
     child.on("close", (exitCode, signal) => {
       finish({
         ok: exitCode === 0,
+        pid: child.pid,
         exitCode,
         signal,
         stdout,

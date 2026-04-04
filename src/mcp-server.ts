@@ -22,6 +22,7 @@ import {
 import { processSessionFile, processSessionWindows } from "./pipeline.js";
 import { resolveSessionFiles, getProjectsDir, listAllSessionFiles, listProjects, extractGitBranch, extractSessionPreview, cwdToProjectDirName, findCallingSession } from "./discovery.js";
 import { querySingleWindow, queryBatch, querySelf, queryAncestors, querySubagents } from "./query.js";
+import { buildBackendDescription, buildBatchSizeDescription, buildDuncanQueryToolDescription } from "./query-config.js";
 
 // ============================================================================
 // Server setup
@@ -40,10 +41,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: "duncan_query",
-      description:
-        "Query dormant Claude Code sessions to recall information from previous conversations. " +
-        "Loads session context and asks the target session's model whether it has relevant information. " +
-        "Use when you need to find something discussed in a previous CC session.",
+      description: buildDuncanQueryToolDescription(),
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -91,9 +89,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "number",
             description: "For 'self' mode: number of parallel queries for sampling diversity (default: 3).",
           },
+          backend: {
+            type: "string",
+            enum: ["api", "headless"],
+            description: buildBackendDescription(),
+          },
           batchSize: {
             type: "number",
-            description: "Max concurrent API calls per batch (default: 5).",
+            description: buildBatchSizeDescription(),
           },
           gitBranch: {
             type: "string",
@@ -231,6 +234,7 @@ async function handleDuncanQuery(args: {
   offset?: number;
   includeSubagents?: boolean;
   copies?: number;
+  backend?: "api" | "headless";
   batchSize?: number;
   gitBranch?: string;
 }, progressToken?: string | number) {
@@ -238,6 +242,7 @@ async function handleDuncanQuery(args: {
     // Self mode: query own active window N times for sampling diversity
     if (args.mode === "self") {
       const result = await querySelf(args.question, {
+        backend: args.backend,
         copies: args.copies ?? 3,
         batchSize: args.batchSize,
         apiKey: undefined,
@@ -265,6 +270,7 @@ async function handleDuncanQuery(args: {
     // Ancestors mode: query prior compaction windows of the calling session
     if (args.mode === "ancestors") {
       const result = await queryAncestors(args.question, {
+        backend: args.backend,
         limit: args.limit ?? 50,
         offset: args.offset ?? 0,
         batchSize: args.batchSize,
@@ -303,6 +309,7 @@ async function handleDuncanQuery(args: {
     // Subagents mode: query subagent transcripts of the calling session
     if (args.mode === "subagents") {
       const result = await querySubagents(args.question, {
+        backend: args.backend,
         limit: args.limit ?? 50,
         offset: args.offset ?? 0,
         batchSize: args.batchSize,
@@ -358,6 +365,7 @@ async function handleDuncanQuery(args: {
         gitBranch: args.gitBranch,
       },
       {
+        backend: args.backend,
         apiKey: undefined,
         batchSize: args.batchSize,
         onProgress: (completed, total) => sendProgress(progressToken, completed, total),

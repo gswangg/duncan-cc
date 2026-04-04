@@ -62,4 +62,12 @@ function boundary(uuid: string) {
   }), /Compaction window must start/);
 }
 
+{
+  const entries = [boundary("b1"), user("u2", "b1", "second")];
+  const windows = deriveSessionWindowsFromEntries(entries);
+  assert.equal(windows.length, 1);
+  assert.equal(windows[0]?.windowIndex, 1);
+  assert.equal(windows[0]?.kind, "compaction");
+}
+
 console.log("headless-boundaries.test.ts: ok");

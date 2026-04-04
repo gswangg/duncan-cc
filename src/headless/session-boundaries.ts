@@ -50,7 +50,7 @@ export function deriveSessionWindowsFromEntries(entries: any[]): SessionWindowBo
     const start = boundaryIndices[i]!;
     const end = i + 1 < boundaryIndices.length ? boundaryIndices[i + 1]! : entries.length;
     windows.push({
-      windowIndex: windows.length,
+      windowIndex: i + 1,
       kind: "compaction",
       startEntryIndex: start,
       endEntryIndex: end,

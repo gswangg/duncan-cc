@@ -449,20 +449,30 @@ Concrete findings:
   - `5` concurrent: ~233 MB peak aggregate RSS, ~2.5 GB peak aggregate virtual size
   - `10` concurrent: ~463 MB peak aggregate RSS, ~5.0 GB peak aggregate virtual size
   - `20` concurrent: ~0.8–0.86 GB peak aggregate RSS, ~9.0–10.0 GB peak aggregate virtual size
-- interpretation: virtual size balloons much faster than RSS in this Node-based synthetic harness, so RSS is the more useful capacity signal; the virtual numbers are still worth watching for address-space / mapping weirdness
+- real-Claude subprocess measurements were then run against staged transcripts, counting only Claude child PIDs:
+  - `5` concurrent: ~1.45 GB peak aggregate RSS, ~382.7 GB peak aggregate virtual size, ~15.4 s wall time
+  - `10` concurrent: ~2.73 GB peak aggregate RSS, ~765.6 GB peak aggregate virtual size, ~26.1 s wall time
+- interpretation: real-Claude RSS also scales roughly linearly with concurrency on this workload, making `batchSize` a real memory-capacity knob for the headless backend rather than just a throughput knob
+- practical consequence on this 4 GB box: `5` concurrent is workable, `10` is tight, and `20` should be treated as unsafe until proven on a roomier machine
 
 Latest validation on this branch:
 - full `npm test` suite: **passing**
 - headless spike tests: **passing**
 - concurrency-sweep memory benchmark: **passing**
 
+Operational note:
+- the real-Claude fanout benchmark should stay **out of the default `npm test` path**
+- run it explicitly via `npm run bench:real-claude-fanout`
+- set `DUNCAN_CC_REAL_BENCH_CONCURRENCIES=5` or `10` (and only later `20` if the machine can take it)
+
 ## Current Recommendation
 
-Do **not** jump straight to a full rewrite.
+Do **not** jump straight to deleting the old path.
 
-First prove, in order:
-1. staged-session correctness
-2. compaction-boundary truncation correctness
-3. 20-way fanout overhead
-
-Then wire the real headless runner behind those contracts.
+Next implementation sequence:
+1. keep the existing API backend intact
+2. add an explicit backend selector (`api` vs `headless`)
+3. wire single-window headless execution first
+4. propagate that backend through batch/self/ancestor query flows
+5. keep warning users that higher `batchSize` values in headless mode require materially more memory
+6. only consider full replacement after correctness and operating-cost confidence are both high
