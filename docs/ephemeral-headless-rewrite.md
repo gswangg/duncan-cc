@@ -137,6 +137,8 @@ Current fidelity strategy on this branch:
 - prefer running Claude with the transcript's original `cwd` when that directory still exists, so normal `CLAUDE.md` auto-discovery and live project context resolution keep working
 - fall back to the staged temp project dir only when the original `cwd` is unavailable
 - memory/CLAUDE.md are therefore currently handled by **original-cwd execution**, not by copying those files into the stage dir
+- headless Claude runs now pass `--no-session-persistence` by default so the subprocess does not create durable Claude transcripts of the derivative staged session
+- `--fork-session` is not used by default because the current goal is ephemeral execution without persistence, not creation of a new durable resumed session lineage
 
 ### 4. Compaction boundaries are real transcript boundaries, not just logical markers
 

@@ -6,6 +6,7 @@ export interface HeadlessRunRequest {
   cwd?: string;
   cliPath?: string;
   outputFormat?: "text" | "json" | "stream-json";
+  noSessionPersistence?: boolean;
   extraArgs?: string[];
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
@@ -29,6 +30,7 @@ export function buildClaudePrintArgs(request: HeadlessRunRequest): string[] {
     "--print",
     "--resume",
     request.resume,
+    ...(request.noSessionPersistence === false ? [] : ["--no-session-persistence"]),
     "--output-format",
     request.outputFormat ?? "json",
     ...(request.extraArgs ?? []),

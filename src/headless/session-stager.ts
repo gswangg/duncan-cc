@@ -10,6 +10,7 @@ export interface StageSessionRequest {
   stageRootDir: string;
   window: SessionWindowBoundary;
   sourceProjectDir?: string;
+  sourceSessionId?: string;
   stageProjectSlug?: string;
   stagedSessionId?: string;
   rewriteEntrySessionIds?: boolean;
@@ -75,7 +76,7 @@ async function countFiles(dir: string): Promise<number> {
 
 export async function stageSession(request: StageSessionRequest): Promise<StageSessionResult> {
   const sourceProjectDir = request.sourceProjectDir ?? dirname(request.sourceSessionFile);
-  const sourceSessionId = basename(request.sourceSessionFile, ".jsonl");
+  const sourceSessionId = request.sourceSessionId ?? basename(request.sourceSessionFile, ".jsonl");
   const stagedSessionId = request.stagedSessionId ?? sourceSessionId;
   const rewriteEntrySessionIds = request.rewriteEntrySessionIds ?? stagedSessionId !== sourceSessionId;
   const stageProjectSlug = request.stageProjectSlug ?? basename(sourceProjectDir);
