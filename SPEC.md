@@ -2,10 +2,17 @@
 
 ## Overview
 
-Duncan-cc replicates CC's full message pipeline to hydrate dormant CC sessions,
-then queries them with questions via the Anthropic API. Exposed as an MCP server
-(stdio transport) with three tools: `duncan_query`, `duncan_projects`, and
-`duncan_list_sessions`.
+Duncan-cc currently replicates CC's full message pipeline to hydrate dormant CC
+sessions, then queries them with questions via the Anthropic API. Exposed as an
+MCP server (stdio transport) with three tools: `duncan_query`,
+`duncan_projects`, and `duncan_list_sessions`.
+
+The rewrite in progress adds a second execution backend:
+- `headless` — staged transcript + real `claude --print --resume <jsonl>` path
+- `api` — prior direct Anthropic API path, kept only as a temporary fallback toggle on this branch
+
+Branch default now points at the `headless` backend. The older API path remains
+available only as a fallback while the cutover is being hardened.
 
 ## Pipeline: Disk → API
 
@@ -172,6 +179,26 @@ For subagent transcripts, the system prompt is dispatched based on agent type
 Note: tool schemas are NOT included — duncan sends only its own `duncan_response`
 tool. The session's original tools are not callable during a duncan query.
 
+## Headless Backend Notes
+
+The headless backend stages transcript files and resumes them through real
+Claude Code. Current proven pieces:
+- staged transcript layout and raw-window slicing
+- compaction-window truncation contracts
+- real `claude --print --resume <jsonl>` invocation wrapper
+- real-Claude memory benchmarking at controlled concurrency
+
+Observed real-Claude memory profile on this 4 GB Linux machine, measuring only
+Claude child PIDs:
+- batch/concurrency `5` → peak aggregate RSS about **1.45 GB**
+- batch/concurrency `10` → peak aggregate RSS about **2.73 GB**
+
+Interpretation:
+- RSS scales roughly linearly with concurrency for this workload
+- virtual size is huge and noisy, but RSS is the meaningful capacity signal
+- `batchSize` must be treated as a memory knob for the headless backend, not
+  just a throughput knob
+
 ## Query Logging
 
 Every query is logged to `~/.claude/duncan.jsonl` as append-only JSONL. Each record:
@@ -235,7 +262,7 @@ Query dormant sessions. Parameters:
 - `offset`: pagination offset
 - `copies`: for self mode, number of samples (default: 3)
 - `includeSubagents`: include subagent transcripts (default: false)
-- `batchSize`: max concurrent API calls per batch (default: 5)
+- `batchSize`: max concurrent queries per batch (default: 5). Warning: for the headless real-Claude backend, memory use scales roughly linearly with `batchSize`; on this 4 GB test machine, `5` concurrent Claude subprocesses used about 1.45 GB RSS and `10` used about 2.73 GB RSS.
 - `gitBranch`: for branch mode, explicit branch name
 
 ### duncan_projects

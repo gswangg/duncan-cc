@@ -14,6 +14,7 @@ import { homedir, platform, userInfo } from "node:os";
 import { processSessionFile, processSessionWindows, type PipelineResult, type WindowPipelineResult } from "./pipeline.js";
 import { resolveSessionFiles, findCallingSession, listAllSessionFiles, listSubagentFiles, type RoutingParams, type RoutingResult } from "./discovery.js";
 import { recordQuery, buildLogRecord } from "./query-logger.js";
+import { querySingleWindowHeadless, resolveQueryBackend, type QueryBackend } from "./headless/query-backend.js";
 
 // ============================================================================
 // OAuth token resolution
@@ -191,11 +192,28 @@ export async function querySingleWindow(
   pipeline: PipelineResult | WindowPipelineResult,
   question: string,
   opts: {
+    backend?: QueryBackend | string;
+    sessionFile?: string;
     apiKey?: string;
     model?: string;
     signal?: AbortSignal;
+    headlessCliPath?: string;
+    headlessStageRootDir?: string;
+    headlessTimeoutMs?: number;
   } = {},
 ): Promise<DuncanResult> {
+  const backend = resolveQueryBackend(opts.backend);
+  if (backend === "headless") {
+    if (!opts.sessionFile) throw new Error("Headless backend requires sessionFile");
+    const windowIndex = "windowIndex" in pipeline ? pipeline.windowIndex : 0;
+    return await querySingleWindowHeadless(opts.sessionFile, windowIndex, question, {
+      model: opts.model ?? pipeline.modelInfo?.modelId,
+      cliPath: opts.headlessCliPath,
+      stageRootDir: opts.headlessStageRootDir,
+      timeoutMs: opts.headlessTimeoutMs,
+    });
+  }
+
   const auth = resolveAuth(opts.apiKey);
   const isOAuth = !!auth.authToken;
   const client = new Anthropic({
@@ -356,11 +374,15 @@ export async function queryBatch(
   question: string,
   routing: RoutingParams,
   opts: {
+    backend?: QueryBackend | string;
     apiKey?: string;
     model?: string;
     signal?: AbortSignal;
     batchSize?: number;
     onProgress?: (completed: number, total: number) => void;
+    headlessCliPath?: string;
+    headlessStageRootDir?: string;
+    headlessTimeoutMs?: number;
   } = {},
 ): Promise<DuncanBatchResult> {
   const queryId = randomUUID();
@@ -435,9 +457,14 @@ export async function queryBatch(
       batch.map(async (target) => {
         try {
           const result = await querySingleWindow(target.pipeline, question, {
+            backend: opts.backend,
+            sessionFile: target.sessionFile,
             apiKey: opts.apiKey,
             model: opts.model ?? target.pipeline.modelInfo?.modelId,
             signal: opts.signal,
+            headlessCliPath: opts.headlessCliPath,
+            headlessStageRootDir: opts.headlessStageRootDir,
+            headlessTimeoutMs: opts.headlessTimeoutMs,
           });
           completed++;
           opts.onProgress?.(completed, targets.length);
@@ -501,12 +528,16 @@ export async function queryBatch(
 export async function querySelf(
   question: string,
   opts: {
+    backend?: QueryBackend | string;
     copies?: number;
     batchSize?: number;
     apiKey?: string;
     model?: string;
     signal?: AbortSignal;
     onProgress?: (completed: number, total: number) => void;
+    headlessCliPath?: string;
+    headlessStageRootDir?: string;
+    headlessTimeoutMs?: number;
   },
 ): Promise<DuncanBatchResult> {
   const queryId = randomUUID();
@@ -550,9 +581,14 @@ export async function querySelf(
   const queryOnce = async (): Promise<DuncanQueryResult> => {
     try {
       const result = await querySingleWindow(activeWindow, question, {
+        backend: opts.backend,
+        sessionFile: session.path,
         apiKey: opts.apiKey,
         model: opts.model ?? activeWindow.modelInfo?.modelId,
         signal: opts.signal,
+        headlessCliPath: opts.headlessCliPath,
+        headlessStageRootDir: opts.headlessStageRootDir,
+        headlessTimeoutMs: opts.headlessTimeoutMs,
       });
       completed++;
       opts.onProgress?.(completed, total);
@@ -619,6 +655,7 @@ export async function querySelf(
 export async function queryAncestors(
   question: string,
   opts: {
+    backend?: QueryBackend | string;
     limit?: number;
     offset?: number;
     batchSize?: number;
@@ -626,6 +663,9 @@ export async function queryAncestors(
     model?: string;
     signal?: AbortSignal;
     onProgress?: (completed: number, total: number) => void;
+    headlessCliPath?: string;
+    headlessStageRootDir?: string;
+    headlessTimeoutMs?: number;
   },
 ): Promise<DuncanBatchResult> {
   const queryId = randomUUID();
@@ -668,9 +708,14 @@ export async function queryAncestors(
       batch.map(async (window) => {
         try {
           const result = await querySingleWindow(window, question, {
+            backend: opts.backend,
+            sessionFile: session.path,
             apiKey: opts.apiKey,
             model: opts.model ?? window.modelInfo?.modelId,
             signal: opts.signal,
+            headlessCliPath: opts.headlessCliPath,
+            headlessStageRootDir: opts.headlessStageRootDir,
+            headlessTimeoutMs: opts.headlessTimeoutMs,
           });
           completed++;
           opts.onProgress?.(completed, page.length);
@@ -724,6 +769,7 @@ export async function queryAncestors(
 export async function querySubagents(
   question: string,
   opts: {
+    backend?: QueryBackend | string;
     limit?: number;
     offset?: number;
     batchSize?: number;
@@ -731,6 +777,9 @@ export async function querySubagents(
     model?: string;
     signal?: AbortSignal;
     onProgress?: (completed: number, total: number) => void;
+    headlessCliPath?: string;
+    headlessStageRootDir?: string;
+    headlessTimeoutMs?: number;
   },
 ): Promise<DuncanBatchResult> {
   const queryId = randomUUID();
@@ -785,9 +834,14 @@ export async function querySubagents(
       batch.map(async (target) => {
         try {
           const result = await querySingleWindow(target.pipeline, question, {
+            backend: opts.backend,
+            sessionFile: target.sessionFile,
             apiKey: opts.apiKey,
             model: opts.model ?? target.pipeline.modelInfo?.modelId,
             signal: opts.signal,
+            headlessCliPath: opts.headlessCliPath,
+            headlessStageRootDir: opts.headlessStageRootDir,
+            headlessTimeoutMs: opts.headlessTimeoutMs,
           });
           completed++;
           opts.onProgress?.(completed, page.length);

@@ -22,6 +22,7 @@ import {
 import { processSessionFile, processSessionWindows } from "./pipeline.js";
 import { resolveSessionFiles, getProjectsDir, listAllSessionFiles, listProjects, extractGitBranch, extractSessionPreview, cwdToProjectDirName, findCallingSession } from "./discovery.js";
 import { querySingleWindow, queryBatch, querySelf, queryAncestors, querySubagents } from "./query.js";
+import { buildBackendDescription, buildBatchSizeDescription, buildDuncanQueryToolDescription } from "./query-config.js";
 
 // ============================================================================
 // Server setup
@@ -36,14 +37,11 @@ const server = new Server(
 // Tool definitions
 // ============================================================================
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+export function getToolDefinitions() {
+  return [
     {
       name: "duncan_query",
-      description:
-        "Query dormant Claude Code sessions to recall information from previous conversations. " +
-        "Loads session context and asks the target session's model whether it has relevant information. " +
-        "Use when you need to find something discussed in a previous CC session.",
+      description: buildDuncanQueryToolDescription(),
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -91,9 +89,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "number",
             description: "For 'self' mode: number of parallel queries for sampling diversity (default: 3).",
           },
+          backend: {
+            type: "string",
+            enum: ["api", "headless"],
+            description: buildBackendDescription(),
+          },
           batchSize: {
             type: "number",
-            description: "Max concurrent API calls per batch (default: 5).",
+            description: buildBatchSizeDescription(),
           },
           gitBranch: {
             type: "string",
@@ -167,12 +170,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["mode"],
       },
     },
-  ],
-}));
+  ];
+}
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: getToolDefinitions() }));
 
 // ============================================================================
 // Tool handlers
 // ============================================================================
+
+let handlers: ReturnType<typeof createDuncanHandlers>;
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args, _meta } = request.params;
@@ -182,11 +189,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   switch (name) {
     case "duncan_query":
-      return handleDuncanQuery(args as any, progressToken);
+      return handlers.handleDuncanQuery(args as any, progressToken);
     case "duncan_projects":
-      return handleListProjects(args as any);
+      return handlers.handleListProjects(args as any);
     case "duncan_list_sessions":
-      return handleListSessions(args as any);
+      return handlers.handleListSessions(args as any);
     default:
       return {
         content: [{ type: "text", text: `Unknown tool: ${name}` }],
@@ -221,307 +228,239 @@ async function sendProgress(progressToken: string | number | undefined, progress
   }
 }
 
-async function handleDuncanQuery(args: {
-  question: string;
-  mode: string;
-  projectDir?: string;
-  sessionId?: string;
-  cwd?: string;
-  limit?: number;
-  offset?: number;
-  includeSubagents?: boolean;
-  copies?: number;
-  batchSize?: number;
-  gitBranch?: string;
-}, progressToken?: string | number) {
-  try {
-    // Self mode: query own active window N times for sampling diversity
-    if (args.mode === "self") {
-      const result = await querySelf(args.question, {
-        copies: args.copies ?? 3,
-        batchSize: args.batchSize,
-        apiKey: undefined,
-        onProgress: (completed, total) => sendProgress(progressToken, completed, total),
-      });
+type HandlerDeps = {
+  findCallingSession: typeof findCallingSession;
+  queryBatch: typeof queryBatch;
+  querySelf: typeof querySelf;
+  queryAncestors: typeof queryAncestors;
+  querySubagents: typeof querySubagents;
+  listProjects: typeof listProjects;
+  resolveSessionFiles: typeof resolveSessionFiles;
+  extractSessionPreview: typeof extractSessionPreview;
+};
 
-      if (result.results.length === 0) {
+const defaultHandlerDeps: HandlerDeps = {
+  findCallingSession,
+  queryBatch,
+  querySelf,
+  queryAncestors,
+  querySubagents,
+  listProjects,
+  resolveSessionFiles,
+  extractSessionPreview,
+};
+
+export function createDuncanHandlers(deps: Partial<HandlerDeps> = {}) {
+  const resolvedDeps: HandlerDeps = { ...defaultHandlerDeps, ...deps };
+
+  const handleDuncanQuery = async (args: {
+    question: string;
+    mode: string;
+    projectDir?: string;
+    sessionId?: string;
+    cwd?: string;
+    limit?: number;
+    offset?: number;
+    includeSubagents?: boolean;
+    copies?: number;
+    backend?: "api" | "headless";
+    batchSize?: number;
+    gitBranch?: string;
+  }, progressToken?: string | number) => {
+    try {
+      if (args.mode === "self") {
+        const result = await resolvedDeps.querySelf(args.question, {
+          backend: args.backend,
+          copies: args.copies ?? 3,
+          batchSize: args.batchSize,
+          apiKey: undefined,
+          onProgress: (completed, total) => sendProgress(progressToken, completed, total),
+        });
+
+        if (result.results.length === 0) {
+          return {
+            content: [{ type: "text", text: "Could not find calling session for self-query." }],
+            isError: true,
+          };
+        }
+
+        const answers = result.results.map((r, i) => `### Sample ${i + 1}\n${r.result.answer}\n*— ${r.model}*`).join("\n\n---\n\n");
+        const contextCount = result.results.filter(r => r.result.hasContext).length;
         return {
-          content: [{ type: "text", text: "Could not find calling session for self-query." }],
-          isError: true,
+          content: [{ type: "text", text: `**${args.question}** (${result.results.length} samples)\n\n${answers}\n\n*${contextCount}/${result.results.length} had relevant context. ${formatTokenStats(result.usage)}. queryId: ${result.queryId}*` }],
         };
       }
 
-      // Format: show all N answers
-      const answers = result.results.map((r, i) => {
-        return `### Sample ${i + 1}\n${r.result.answer}\n*— ${r.model}*`;
-      }).join("\n\n---\n\n");
+      if (args.mode === "ancestors") {
+        const result = await resolvedDeps.queryAncestors(args.question, {
+          backend: args.backend,
+          limit: args.limit ?? 50,
+          offset: args.offset ?? 0,
+          batchSize: args.batchSize,
+          apiKey: undefined,
+          onProgress: (completed, total) => sendProgress(progressToken, completed, total),
+        });
 
-      const contextCount = result.results.filter(r => r.result.hasContext).length;
-      return {
-        content: [{ type: "text", text: `**${args.question}** (${result.results.length} samples)\n\n${answers}\n\n*${contextCount}/${result.results.length} had relevant context. ${formatTokenStats(result.usage)}. queryId: ${result.queryId}*` }],
-      };
-    }
+        if (result.results.length === 0) {
+          return { content: [{ type: "text", text: "No ancestor windows found. This session has no compaction boundaries." }] };
+        }
 
-    // Ancestors mode: query prior compaction windows of the calling session
-    if (args.mode === "ancestors") {
-      const result = await queryAncestors(args.question, {
-        limit: args.limit ?? 50,
-        offset: args.offset ?? 0,
-        batchSize: args.batchSize,
-        apiKey: undefined,
-        onProgress: (completed, total) => sendProgress(progressToken, completed, total),
-      });
+        const withContext = result.results.filter(r => r.result.hasContext);
+        const relevant = withContext.length > 0 ? withContext : result.results;
+        const answers = relevant.map((r) => `${relevant.length === 1 ? "" : `### Window ${r.windowIndex}\n`}${r.result.answer}\n*— ${r.model}*`).join("\n\n---\n\n");
+        const parts = [`**${args.question}**\n\n${answers}`];
+        if (result.hasMore) {
+          const nextOffset = (args.offset ?? 0) + (args.limit ?? 50);
+          const remaining = result.totalWindows - nextOffset;
+          parts.push(`\n\n---\n*Queried ${result.results.length} of ${result.totalWindows} windows. ${remaining} more available — call again with offset: ${nextOffset}.*`);
+        }
+        parts.push(`\n\n*${withContext.length}/${result.results.length} windows had relevant context. ${formatTokenStats(result.usage)}. queryId: ${result.queryId}*`);
+        return { content: [{ type: "text", text: parts.join("") }] };
+      }
+
+      if (args.mode === "subagents") {
+        const result = await resolvedDeps.querySubagents(args.question, {
+          backend: args.backend,
+          limit: args.limit ?? 50,
+          offset: args.offset ?? 0,
+          batchSize: args.batchSize,
+          apiKey: undefined,
+          onProgress: (completed, total) => sendProgress(progressToken, completed, total),
+        });
+
+        if (result.results.length === 0) {
+          return { content: [{ type: "text", text: "No subagent transcripts found for this session." }] };
+        }
+
+        const errors = result.results.filter(r => r.result.answer.startsWith("Error: "));
+        const nonErrors = result.results.filter(r => !r.result.answer.startsWith("Error: "));
+        const withContext = nonErrors.filter(r => r.result.hasContext);
+        const relevant = withContext.length > 0 ? withContext : nonErrors.length > 0 ? nonErrors : result.results;
+        const answers = relevant.map((r) => `${relevant.length === 1 ? "" : `### ${r.sessionId.slice(0, 20)} (window ${r.windowIndex})\n`}${r.result.answer}\n*— ${r.model}*`).join("\n\n---\n\n");
+        const parts = [`**${args.question}**\n\n${answers}`];
+        if (errors.length > 0) {
+          const errorLines = errors.map(r => `- ${r.sessionId.slice(0, 20)} (window ${r.windowIndex}): ${r.result.answer}`).join("\n");
+          parts.push(`\n\n---\n**${errors.length} error(s):**\n${errorLines}`);
+        }
+        if (result.hasMore) {
+          const nextOffset = (args.offset ?? 0) + (args.limit ?? 50);
+          const remaining = result.totalWindows - nextOffset;
+          parts.push(`\n\n---\n*Queried ${result.results.length} of ${result.totalWindows} windows. ${remaining} more available — call again with offset: ${nextOffset}.*`);
+        }
+        parts.push(`\n\n*${withContext.length}/${result.results.length} subagent windows had relevant context. ${formatTokenStats(result.usage)}. queryId: ${result.queryId}*`);
+        return { content: [{ type: "text", text: parts.join("") }] };
+      }
+
+      const result = await resolvedDeps.queryBatch(
+        args.question,
+        {
+          mode: args.mode as any,
+          projectDir: args.projectDir,
+          sessionId: args.sessionId,
+          cwd: args.cwd ?? resolvedDeps.findCallingSession()?.cwd,
+          limit: args.limit ?? 10,
+          offset: args.offset ?? 0,
+          includeSubagents: args.includeSubagents ?? false,
+          gitBranch: args.gitBranch,
+        },
+        {
+          backend: args.backend,
+          apiKey: undefined,
+          batchSize: args.batchSize,
+          onProgress: (completed, total) => sendProgress(progressToken, completed, total),
+        },
+      );
 
       if (result.results.length === 0) {
-        return {
-          content: [{ type: "text", text: "No ancestor windows found. This session has no compaction boundaries." }],
-        };
+        return { content: [{ type: "text", text: "No sessions found matching the routing criteria." }] };
       }
 
-      const withContext = result.results.filter(r => r.result.hasContext);
-      const relevant = withContext.length > 0 ? withContext : result.results;
-
-      const answers = relevant.map((r) => {
-        const label = relevant.length === 1 ? "" : `### Window ${r.windowIndex}\n`;
-        return `${label}${r.result.answer}\n*— ${r.model}*`;
-      }).join("\n\n---\n\n");
-
-      const parts = [`**${args.question}**\n\n${answers}`];
-
-      if (result.hasMore) {
-        const nextOffset = (args.offset ?? 0) + (args.limit ?? 50);
-        const remaining = result.totalWindows - nextOffset;
-        parts.push(`\n\n---\n*Queried ${result.results.length} of ${result.totalWindows} windows. ${remaining} more available — call again with offset: ${nextOffset}.*`);
-      }
-
-      const contextCount = withContext.length;
-      parts.push(`\n\n*${contextCount}/${result.results.length} windows had relevant context. ${formatTokenStats(result.usage)}. queryId: ${result.queryId}*`);
-
-      return { content: [{ type: "text", text: parts.join("") }] };
-    }
-
-    // Subagents mode: query subagent transcripts of the calling session
-    if (args.mode === "subagents") {
-      const result = await querySubagents(args.question, {
-        limit: args.limit ?? 50,
-        offset: args.offset ?? 0,
-        batchSize: args.batchSize,
-        apiKey: undefined,
-        onProgress: (completed, total) => sendProgress(progressToken, completed, total),
-      });
-
-      if (result.results.length === 0) {
-        return {
-          content: [{ type: "text", text: "No subagent transcripts found for this session." }],
-        };
-      }
-
-      const errors = result.results.filter(r => r.result.answer.startsWith("Error: "));
-      const nonErrors = result.results.filter(r => !r.result.answer.startsWith("Error: "));
-      const withContext = nonErrors.filter(r => r.result.hasContext);
+      const errors = result.results.filter((r) => r.result.answer.startsWith("Error: "));
+      const nonErrors = result.results.filter((r) => !r.result.answer.startsWith("Error: "));
+      const withContext = nonErrors.filter((r) => r.result.hasContext);
       const relevant = withContext.length > 0 ? withContext : nonErrors.length > 0 ? nonErrors : result.results;
-
-      const answers = relevant.map((r) => {
-        const label = relevant.length === 1 ? "" : `### ${r.sessionId.slice(0, 20)} (window ${r.windowIndex})\n`;
-        return `${label}${r.result.answer}\n*— ${r.model}*`;
-      }).join("\n\n---\n\n");
-
+      const answers = relevant.map((r) => `${relevant.length === 1 ? "" : `### ${r.sessionId.slice(0, 12)} (window ${r.windowIndex})\n`}${r.result.answer}\n*— ${r.model}*`).join("\n\n---\n\n");
       const parts = [`**${args.question}**\n\n${answers}`];
-
       if (errors.length > 0) {
-        const errorLines = errors.map(r => `- ${r.sessionId.slice(0, 20)} (window ${r.windowIndex}): ${r.result.answer}`).join("\n");
+        const errorLines = errors.map((r) => `- ${r.sessionId.slice(0, 12)} (window ${r.windowIndex}): ${r.result.answer}`).join("\n");
         parts.push(`\n\n---\n**${errors.length} error(s):**\n${errorLines}`);
       }
-
       if (result.hasMore) {
-        const nextOffset = (args.offset ?? 0) + (args.limit ?? 50);
+        const nextOffset = (args.offset ?? 0) + (args.limit ?? 10);
         const remaining = result.totalWindows - nextOffset;
         parts.push(`\n\n---\n*Queried ${result.results.length} of ${result.totalWindows} windows. ${remaining} more available — call again with offset: ${nextOffset}.*`);
       }
-
-      const contextCount = withContext.length;
-      parts.push(`\n\n*${contextCount}/${result.results.length} subagent windows had relevant context. ${formatTokenStats(result.usage)}. queryId: ${result.queryId}*`);
-
+      parts.push(`\n\n*${withContext.length}/${result.results.length} sessions had relevant context. ${formatTokenStats(result.usage)}. queryId: ${result.queryId}*`);
       return { content: [{ type: "text", text: parts.join("") }] };
-    }
-
-    const result = await queryBatch(
-      args.question,
-      {
-        mode: args.mode as any,
-        projectDir: args.projectDir,
-        sessionId: args.sessionId,
-        cwd: args.cwd ?? findCallingSession()?.cwd,
-        limit: args.limit ?? 10,
-        offset: args.offset ?? 0,
-        includeSubagents: args.includeSubagents ?? false,
-        gitBranch: args.gitBranch,
-      },
-      {
-        apiKey: undefined,
-        batchSize: args.batchSize,
-        onProgress: (completed, total) => sendProgress(progressToken, completed, total),
-      },
-    );
-
-    if (result.results.length === 0) {
+    } catch (err: any) {
       return {
-        content: [{ type: "text", text: "No sessions found matching the routing criteria." }],
+        content: [{ type: "text", text: `Duncan query error: ${err.message}` }],
+        isError: true,
       };
     }
+  };
 
-    const errors = result.results.filter((r) => r.result.answer.startsWith("Error: "));
-    const nonErrors = result.results.filter((r) => !r.result.answer.startsWith("Error: "));
-    const withContext = nonErrors.filter((r) => r.result.hasContext);
-    const relevant = withContext.length > 0 ? withContext : nonErrors.length > 0 ? nonErrors : result.results;
-
-    const answers = relevant
-      .map((r) => {
-        const label = relevant.length === 1
-          ? ""
-          : `### ${r.sessionId.slice(0, 12)} (window ${r.windowIndex})\n`;
-        const modelLine = `\n*— ${r.model}*`;
-        return `${label}${r.result.answer}${modelLine}`;
-      })
-      .join("\n\n---\n\n");
-
-    const parts = [`**${args.question}**\n\n${answers}`];
-
-    if (errors.length > 0) {
-      const errorLines = errors.map((r) => `- ${r.sessionId.slice(0, 12)} (window ${r.windowIndex}): ${r.result.answer}`).join("\n");
-      parts.push(`\n\n---\n**${errors.length} error(s):**\n${errorLines}`);
-    }
-
-    if (result.hasMore) {
-      const nextOffset = (args.offset ?? 0) + (args.limit ?? 10);
-      const remaining = result.totalWindows - nextOffset;
-      parts.push(
-        `\n\n---\n*Queried ${result.results.length} of ${result.totalWindows} windows. ${remaining} more available — call again with offset: ${nextOffset}.*`,
-      );
-    }
-
-    const contextCount = withContext.length;
-    const totalCount = result.results.length;
-    parts.push(`\n\n*${contextCount}/${totalCount} sessions had relevant context. ${formatTokenStats(result.usage)}. queryId: ${result.queryId}*`);
-
-    return {
-      content: [{ type: "text", text: parts.join("") }],
-    };
-  } catch (err: any) {
-    return {
-      content: [{ type: "text", text: `Duncan query error: ${err.message}` }],
-      isError: true,
-    };
-  }
-}
-
-async function handleListProjects(args: {
-  limit?: number;
-  offset?: number;
-}) {
-  try {
-    const result = listProjects({ limit: args.limit, offset: args.offset });
-
-    if (result.projects.length === 0) {
-      return {
-        content: [{ type: "text", text: "No projects found." }],
-      };
-    }
-
-    const lines = result.projects.map((p) => {
-      const date = p.lastActivity.toISOString().slice(0, 16);
-      const branches = p.branches.length > 0 ? p.branches.join(", ") : "—";
-      return `${p.cwd}\n  sessions: ${p.sessionCount}  last: ${date}  branches: ${branches}`;
-    });
-
-    const header = `${result.totalCount} projects${result.hasMore ? ` (showing ${result.projects.length})` : ""}:`;
-    return {
-      content: [{ type: "text", text: `${header}\n\n${lines.join("\n\n")}` }],
-    };
-  } catch (err: any) {
-    return {
-      content: [{ type: "text", text: `Error listing projects: ${err.message}` }],
-      isError: true,
-    };
-  }
-}
-
-async function handleListSessions(args: {
-  mode: string;
-  projectDir?: string;
-  projectPath?: string;
-  cwd?: string;
-  limit?: number;
-  previews?: boolean;
-  previewLines?: number;
-}) {
-  try {
-    // Resolve projectDir from projectPath if provided
-    const projectDir = args.projectDir
-      ?? (args.projectPath ? join(getProjectsDir(), cwdToProjectDirName(args.projectPath)) : undefined);
-
-    const resolved = resolveSessionFiles({
-      mode: args.mode as any,
-      projectDir,
-      cwd: args.cwd ?? findCallingSession()?.cwd,
-      limit: args.limit ?? 20,
-    });
-
-    if (resolved.sessions.length === 0) {
-      return {
-        content: [{ type: "text", text: "No sessions found." }],
-      };
-    }
-
-    const showPreviews = args.previews !== false;
-    const previewLines = args.previewLines ?? 2;
-
-    const lines = resolved.sessions.map((s) => {
-      const date = s.mtime.toISOString().slice(0, 16);
-      const size = s.size > 1024 * 1024
-        ? `${(s.size / 1024 / 1024).toFixed(1)}MB`
-        : `${(s.size / 1024).toFixed(0)}KB`;
-
-      let line = `**${s.sessionId.slice(0, 12)}**  ${date}  ${size}`;
-
-      if (showPreviews) {
-        const preview = extractSessionPreview(s.path, previewLines);
-        if (preview.gitBranch) line += `  branch: ${preview.gitBranch}`;
-        if (preview.cwd) line += `\n  cwd: ${preview.cwd}`;
-
-        const roleIcon = (role: string) => role === "assistant" ? "◇" : "▸";
-        const formatMsg = (m: { role: string; text: string }) => {
-          const truncated = m.text.replace(/\n/g, " ").slice(0, 120);
-          return `${roleIcon(m.role)} ${truncated}${m.text.length > 120 ? "…" : ""}`;
-        };
-
-        if (preview.headMessages.length > 0) {
-          for (const m of preview.headMessages) {
-            line += `\n  ${formatMsg(m)}`;
-          }
-        }
-        if (preview.tailMessages.length > 0) {
-          line += `\n  ...`;
-          for (const m of preview.tailMessages) {
-            line += `\n  ${formatMsg(m)}`;
-          }
-        }
+  const handleListProjects = async (args: { limit?: number; offset?: number }) => {
+    try {
+      const result = resolvedDeps.listProjects({ limit: args.limit, offset: args.offset });
+      if (result.projects.length === 0) {
+        return { content: [{ type: "text", text: "No projects found." }] };
       }
+      const lines = result.projects.map((p) => {
+        const date = p.lastActivity.toISOString().slice(0, 16);
+        const branches = p.branches.length > 0 ? p.branches.join(", ") : "—";
+        return `${p.cwd}\n  sessions: ${p.sessionCount}  last: ${date}  branches: ${branches}`;
+      });
+      const header = `${result.totalCount} projects${result.hasMore ? ` (showing ${result.projects.length})` : ""}:`;
+      return { content: [{ type: "text", text: `${header}\n\n${lines.join("\n\n")}` }] };
+    } catch (err: any) {
+      return { content: [{ type: "text", text: `Error listing projects: ${err.message}` }], isError: true };
+    }
+  };
 
-      return line;
-    });
+  const handleListSessions = async (args: { mode: string; projectDir?: string; projectPath?: string; cwd?: string; limit?: number; previews?: boolean; previewLines?: number; }) => {
+    try {
+      const projectDir = args.projectDir ?? (args.projectPath ? join(getProjectsDir(), cwdToProjectDirName(args.projectPath)) : undefined);
+      const resolved = resolvedDeps.resolveSessionFiles({
+        mode: args.mode as any,
+        projectDir,
+        cwd: args.cwd ?? resolvedDeps.findCallingSession()?.cwd,
+        limit: args.limit ?? 20,
+      });
+      if (resolved.sessions.length === 0) {
+        return { content: [{ type: "text", text: "No sessions found." }] };
+      }
+      const showPreviews = args.previews !== false;
+      const previewLines = args.previewLines ?? 2;
+      const lines = resolved.sessions.map((s) => {
+        const date = s.mtime.toISOString().slice(0, 16);
+        const size = s.size > 1024 * 1024 ? `${(s.size / 1024 / 1024).toFixed(1)}MB` : `${(s.size / 1024).toFixed(0)}KB`;
+        let line = `**${s.sessionId.slice(0, 12)}**  ${date}  ${size}`;
+        if (showPreviews) {
+          const preview = resolvedDeps.extractSessionPreview(s.path, previewLines);
+          if (preview.gitBranch) line += `  branch: ${preview.gitBranch}`;
+          if (preview.cwd) line += `\n  cwd: ${preview.cwd}`;
+          const roleIcon = (role: string) => role === "assistant" ? "◇" : "▸";
+          const formatMsg = (m: { role: string; text: string }) => `${roleIcon(m.role)} ${m.text.replace(/\n/g, " ").slice(0, 120)}${m.text.length > 120 ? "…" : ""}`;
+          if (preview.headMessages.length > 0) for (const m of preview.headMessages) line += `\n  ${formatMsg(m)}`;
+          if (preview.tailMessages.length > 0) {
+            line += `\n  ...`;
+            for (const m of preview.tailMessages) line += `\n  ${formatMsg(m)}`;
+          }
+        }
+        return line;
+      });
+      const header = `${resolved.totalCount} sessions${resolved.hasMore ? ` (showing ${resolved.sessions.length})` : ""}:`;
+      return { content: [{ type: "text", text: `${header}\n\n${lines.join("\n\n")}` }] };
+    } catch (err: any) {
+      return { content: [{ type: "text", text: `Error listing sessions: ${err.message}` }], isError: true };
+    }
+  };
 
-    const header = `${resolved.totalCount} sessions${resolved.hasMore ? ` (showing ${resolved.sessions.length})` : ""}:`;
-    return {
-      content: [{ type: "text", text: `${header}\n\n${lines.join("\n\n")}` }],
-    };
-  } catch (err: any) {
-    return {
-      content: [{ type: "text", text: `Error listing sessions: ${err.message}` }],
-      isError: true,
-    };
-  }
+  return { handleDuncanQuery, handleListProjects, handleListSessions };
 }
+
+handlers = createDuncanHandlers();
 
 // ============================================================================
 // Start server
@@ -533,7 +472,9 @@ async function main() {
   console.error("duncan-cc MCP server running on stdio");
 }
 
-main().catch((err) => {
-  console.error("Fatal:", err);
-  process.exit(1);
-});
+if (process.argv[1] && process.argv[1] === new URL(import.meta.url).pathname) {
+  main().catch((err) => {
+    console.error("Fatal:", err);
+    process.exit(1);
+  });
+}
