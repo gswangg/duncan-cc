@@ -36,6 +36,10 @@ const server = new Server(
 // Tool definitions
 // ============================================================================
 
+// readOnlyHint: Claude Code uses this to mark tools as concurrency-safe,
+// allowing parallel execution with other read-only tools. duncan_query does
+// append to ~/.claude/duncan.jsonl, but appendFileSync on POSIX is atomic
+// for single lines — no read-modify-write, no shared state, no corruption risk.
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
@@ -44,6 +48,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         "Query dormant Claude Code sessions to recall information from previous conversations. " +
         "Loads session context and asks the target session's model whether it has relevant information. " +
         "Use when you need to find something discussed in a previous CC session.",
+      annotations: {
+        readOnlyHint: true, // append-only log write is concurrency-safe
+      },
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -109,6 +116,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         "List all Claude Code projects with metadata. Use to discover what projects exist " +
         "before targeting a specific project with duncan_query. Returns project directories, " +
         "session counts, last activity timestamps, and git branches.",
+      annotations: {
+        readOnlyHint: true,
+      },
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -131,6 +141,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         "Use to discover sessions before querying. " +
         "Returns session IDs, timestamps, sizes, git branches, working directories, " +
         "and first/last user message previews.",
+      annotations: {
+        readOnlyHint: true,
+      },
       inputSchema: {
         type: "object" as const,
         properties: {
