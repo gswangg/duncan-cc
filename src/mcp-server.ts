@@ -36,6 +36,10 @@ const server = new Server(
 // Tool definitions
 // ============================================================================
 
+// readOnlyHint: Claude Code uses this to mark tools as concurrency-safe,
+// allowing parallel execution with other read-only tools. duncan_query does
+// append to ~/.claude/duncan.jsonl, but appendFileSync on POSIX is atomic
+// for single lines — no read-modify-write, no shared state, no corruption risk.
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
@@ -45,7 +49,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         "Loads session context and asks the target session's model whether it has relevant information. " +
         "Use when you need to find something discussed in a previous CC session.",
       annotations: {
-        readOnlyHint: true,
+        readOnlyHint: true, // append-only log write is concurrency-safe
       },
       inputSchema: {
         type: "object" as const,
