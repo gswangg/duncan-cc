@@ -129,13 +129,21 @@ export function isEphemeralProgress(type: string): boolean {
 
 /** API error message check — CC's Lt1() */
 const INTERNAL_ERROR_MODEL = "internal_error";
+const SYNTHETIC_ERROR_MODEL = "<synthetic>";
+
+/** Model strings that mark pseudo-assistant entries injected by the CC harness
+ * (API errors, "Prompt is too long" boundaries, etc.) and should never be
+ * forwarded to the Anthropic API as a real model id. */
+export const NON_REAL_ASSISTANT_MODELS: ReadonlySet<string> = new Set([
+  INTERNAL_ERROR_MODEL,
+  SYNTHETIC_ERROR_MODEL,
+]);
 
 export function isApiErrorMessage(entry: any): boolean {
-  return (
-    entry.type === "assistant" &&
-    entry.isApiErrorMessage === true &&
-    entry.message?.model === INTERNAL_ERROR_MODEL
-  );
+  if (entry?.type !== "assistant") return false;
+  if (entry.isApiErrorMessage === true) return true;
+  const model = entry.message?.model;
+  return typeof model === "string" && NON_REAL_ASSISTANT_MODELS.has(model);
 }
 
 /** Local command system message check — CC's gp1() */
