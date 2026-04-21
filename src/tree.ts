@@ -8,7 +8,7 @@
  */
 
 import type { CCMessage, ParsedSession } from "./parser.js";
-import { isCompactBoundary } from "./parser.js";
+import { isCompactBoundary, NON_REAL_ASSISTANT_MODELS } from "./parser.js";
 
 // ============================================================================
 // Leaf Detection
@@ -188,7 +188,11 @@ export function getCompactionWindows(chain: CCMessage[]): CompactionWindow[] {
     let info: { provider: string; modelId: string } | undefined;
     for (let i = start; i < end; i++) {
       const msg = chain[i];
-      if (msg.type === "assistant" && msg.message?.model) {
+      if (
+        msg.type === "assistant" &&
+        msg.message?.model &&
+        !NON_REAL_ASSISTANT_MODELS.has(msg.message.model)
+      ) {
         info = { provider: "anthropic", modelId: msg.message.model };
       }
     }

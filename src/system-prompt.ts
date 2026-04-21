@@ -154,6 +154,7 @@ If you can say it in one sentence, don't use three. Prefer short, direct sentenc
 function knowledgeCutoff(modelId?: string): string | null {
   if (!modelId) return null;
   const id = modelId.toLowerCase();
+  if (id.includes("claude-opus-4-7")) return "January 2026";
   if (id.includes("claude-sonnet-4-6")) return "August 2025";
   if (id.includes("claude-opus-4-6")) return "May 2025";
   if (id.includes("claude-opus-4-5")) return "May 2025";

@@ -99,6 +99,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             description: "For 'branch' mode: explicit git branch name. If omitted, uses the calling session's branch.",
           },
+          minimalSystemPrompt: {
+            type: "boolean",
+            description:
+              "Drop the full Claude Code system prompt (~3k tokens) and send a tiny placeholder instead. " +
+              "Use when a target window is near the 1M context cap and you need to shave tokens, " +
+              "or for simple recall queries that don't need the full CC persona. Default: false.",
+          },
+          maxPromptTokens: {
+            type: "number",
+            description:
+              "Hard cap on prompt tokens (system + messages). When the transcript would exceed this, " +
+              "drop the oldest messages one-by-one until the prompt fits and append a truncation note " +
+              "to the system prompt. Use when a target window is too big to query otherwise. " +
+              "Recommended: 950000 for 1M-context models (leaves ~5k headroom for output), " +
+              "180000 for 200k-context models. Truncation keeps the tail (most recent exchanges) " +
+              "and discards early history, so results reflect the end of the conversation.",
+          },
         },
         required: ["question", "mode"],
       },
@@ -233,6 +250,8 @@ async function handleDuncanQuery(args: {
   copies?: number;
   batchSize?: number;
   gitBranch?: string;
+  minimalSystemPrompt?: boolean;
+  maxPromptTokens?: number;
 }, progressToken?: string | number) {
   try {
     // Self mode: query own active window N times for sampling diversity
@@ -241,6 +260,8 @@ async function handleDuncanQuery(args: {
         copies: args.copies ?? 3,
         batchSize: args.batchSize,
         apiKey: undefined,
+        minimalSystemPrompt: args.minimalSystemPrompt,
+        maxPromptTokens: args.maxPromptTokens,
         onProgress: (completed, total) => sendProgress(progressToken, completed, total),
       });
 
@@ -269,6 +290,8 @@ async function handleDuncanQuery(args: {
         offset: args.offset ?? 0,
         batchSize: args.batchSize,
         apiKey: undefined,
+        minimalSystemPrompt: args.minimalSystemPrompt,
+        maxPromptTokens: args.maxPromptTokens,
         onProgress: (completed, total) => sendProgress(progressToken, completed, total),
       });
 
@@ -307,6 +330,8 @@ async function handleDuncanQuery(args: {
         offset: args.offset ?? 0,
         batchSize: args.batchSize,
         apiKey: undefined,
+        minimalSystemPrompt: args.minimalSystemPrompt,
+        maxPromptTokens: args.maxPromptTokens,
         onProgress: (completed, total) => sendProgress(progressToken, completed, total),
       });
 
@@ -360,6 +385,8 @@ async function handleDuncanQuery(args: {
       {
         apiKey: undefined,
         batchSize: args.batchSize,
+        minimalSystemPrompt: args.minimalSystemPrompt,
+        maxPromptTokens: args.maxPromptTokens,
         onProgress: (completed, total) => sendProgress(progressToken, completed, total),
       },
     );

@@ -361,6 +361,8 @@ export async function queryBatch(
     signal?: AbortSignal;
     batchSize?: number;
     onProgress?: (completed: number, total: number) => void;
+    minimalSystemPrompt?: boolean;
+    maxPromptTokens?: number;
   } = {},
 ): Promise<DuncanBatchResult> {
   const queryId = randomUUID();
@@ -398,6 +400,8 @@ export async function queryBatch(
     try {
       const windows = processSessionWindows(session.path, {
         agentType: session.agentType,
+        minimalSystemPrompt: opts.minimalSystemPrompt,
+        maxPromptTokens: opts.maxPromptTokens,
       });
       const isCalling = session.sessionId === callingSessionId;
 
@@ -507,6 +511,8 @@ export async function querySelf(
     model?: string;
     signal?: AbortSignal;
     onProgress?: (completed: number, total: number) => void;
+    minimalSystemPrompt?: boolean;
+    maxPromptTokens?: number;
   },
 ): Promise<DuncanBatchResult> {
   const queryId = randomUUID();
@@ -530,7 +536,10 @@ export async function querySelf(
   }
 
   // Process the session and get the LAST (active) window
-  const windows = processSessionWindows(session.path);
+  const windows = processSessionWindows(session.path, {
+    minimalSystemPrompt: opts.minimalSystemPrompt,
+    maxPromptTokens: opts.maxPromptTokens,
+  });
   if (windows.length === 0) {
     return {
       queryId, question, results: [], totalWindows: 0, hasMore: false, offset: 0, usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
@@ -626,6 +635,8 @@ export async function queryAncestors(
     model?: string;
     signal?: AbortSignal;
     onProgress?: (completed: number, total: number) => void;
+    minimalSystemPrompt?: boolean;
+    maxPromptTokens?: number;
   },
 ): Promise<DuncanBatchResult> {
   const queryId = randomUUID();
@@ -646,7 +657,10 @@ export async function queryAncestors(
   }
 
   // Get all windows, drop the last (active) one
-  const allWindows = processSessionWindows(session.path);
+  const allWindows = processSessionWindows(session.path, {
+    minimalSystemPrompt: opts.minimalSystemPrompt,
+    maxPromptTokens: opts.maxPromptTokens,
+  });
   const ancestorWindows = allWindows.slice(0, -1).filter(w => w.messages.length > 0);
 
   if (ancestorWindows.length === 0) {
@@ -731,6 +745,8 @@ export async function querySubagents(
     model?: string;
     signal?: AbortSignal;
     onProgress?: (completed: number, total: number) => void;
+    minimalSystemPrompt?: boolean;
+    maxPromptTokens?: number;
   },
 ): Promise<DuncanBatchResult> {
   const queryId = randomUUID();
@@ -759,7 +775,11 @@ export async function querySubagents(
   const allTargets: Array<{ sessionFile: string; sessionId: string; pipeline: WindowPipelineResult }> = [];
   for (const sub of subagentFiles) {
     try {
-      const windows = processSessionWindows(sub.path, { agentType: sub.agentType });
+      const windows = processSessionWindows(sub.path, {
+        agentType: sub.agentType,
+        minimalSystemPrompt: opts.minimalSystemPrompt,
+        maxPromptTokens: opts.maxPromptTokens,
+      });
       for (const w of windows) {
         if (w.messages.length === 0) continue;
         allTargets.push({ sessionFile: sub.path, sessionId: sub.sessionId, pipeline: w });
